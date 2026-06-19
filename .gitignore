@@ -1,0 +1,9 @@
+node_modules
+dist
+.pnpm-store
+.DS_Store
+*.tsbuildinfo
+server/.data
+__pycache__
+.venv
+.venv/
