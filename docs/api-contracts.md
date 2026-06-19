@@ -8,6 +8,8 @@
 - 重量单位为 gram
 - 所有关键修改接口都应写入审计日志
 - 系统只记录线下付款，不接入支付网关
+- 拼单状态第一版使用中文业务状态：等待开团、拼拼拼、已切、已截团、已完成、已取消
+- 图片字段保存对象 URL，第一版对象来源为本地 MinIO 服务
 
 ## 用户与身份
 
@@ -109,7 +111,7 @@ POST /api/group-buys/{groupBuyId}/status
 
 ```json
 {
-  "status": "ordered_open",
+  "status": "已切",
   "reason": "已切，继续拼出剩余库存"
 }
 ```
@@ -156,7 +158,7 @@ POST /api/charges/{chargeId}/payment-proofs
 {
   "amountCny": "105.00",
   "paidAt": "2026-06-19T20:00:00+08:00",
-  "proofImageUrl": "https://example.com/proof.jpg",
+  "proofImageUrl": "http://minio.local/ribsys/proofs/proof.jpg",
   "note": "支付宝已付"
 }
 ```
@@ -196,7 +198,7 @@ POST /api/group-buys/{groupBuyId}/japan-orders
 ```json
 {
   "buyerUserId": "user_2",
-  "orderScreenshotUrl": "https://example.com/order.jpg",
+  "orderScreenshotUrl": "http://minio.local/ribsys/orders/order.jpg",
   "website": null,
   "websiteOrderNo": null,
   "orderedAt": "2026-06-20T10:00:00+09:00",
@@ -267,6 +269,7 @@ POST /api/international-batches/{batchId}/fee-allocations
 
 - 生成 InternationalFeeAllocation
 - 为每个成员生成国际费用 Charge
+- 税费默认按本次国际运输涉及的全部订单成员均摊，具体金额允许手动编辑
 
 ## 囤货与排发
 
@@ -387,3 +390,4 @@ POST /api/transfers/{transferId}/approve
 - 新成员获得对应份额
 - 后续未发生费用归新成员
 - 历史已确认付款记录不迁移，只保留追溯关系
+- 转单默认要求双方线下确认后提交申请，再由维护人或管理员审核通过
