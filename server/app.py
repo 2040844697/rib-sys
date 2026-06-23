@@ -16,20 +16,39 @@ if __package__ in {None, ""}:
 
     from server.auth import AuthModule, ensure_identity_seed
     from server.config import load_config
-    from server.db_bootstrap import initialize_database_schema
+    from server.db_bootstrap import describe_database_target, initialize_database_schema
     from server.errors import AppError
     from server.store import create_store
 else:
     from .auth import AuthModule, ensure_identity_seed
     from .config import load_config
-    from .db_bootstrap import initialize_database_schema
+    from .db_bootstrap import describe_database_target, initialize_database_schema
     from .errors import AppError
     from .store import create_store
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG = load_config(ROOT_DIR)
-DB_BOOTSTRAP = initialize_database_schema(CONFIG)
+
+
+def _initialize_database_bootstrap():
+    if CONFIG.database_url:
+        print(
+            "[ribsys-api] database bootstrap config: "
+            f"target={describe_database_target(CONFIG)}, "
+            f"initOnStartup={CONFIG.init_db_on_startup}, "
+            f"initSql={CONFIG.db_init_sql_file}"
+        )
+    else:
+        print(
+            "[ribsys-api] database bootstrap config: "
+            "DATABASE_URL not configured; startup init will be skipped"
+        )
+
+    return initialize_database_schema(CONFIG)
+
+
+DB_BOOTSTRAP = _initialize_database_bootstrap()
 STORE = create_store(CONFIG)
 AUTH = AuthModule(CONFIG)
 IDENTITY_BOOTSTRAP = ensure_identity_seed(CONFIG, audit_store=STORE)
