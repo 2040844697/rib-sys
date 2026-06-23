@@ -31,18 +31,21 @@ function requireUser(request: Request) {
     request.headers.get("X-Session-Token") ?? request.headers.get("X-Mock-Session");
   const user = getUserBySessionToken(sessionToken);
   if (!user) {
-    return HttpResponse.json({ message: "请先登录" }, { status: 401 });
+    return HttpResponse.json(
+      { code: "UNAUTHORIZED", message: "请先登录", details: null },
+      { status: 401 },
+    );
   }
 
   return user;
 }
 
 function notFound(message = "数据不存在") {
-  return HttpResponse.json({ message }, { status: 404 });
+  return HttpResponse.json({ code: "NOT_FOUND", message, details: null }, { status: 404 });
 }
 
 function forbidden(message = "当前账号暂时没有权限") {
-  return HttpResponse.json({ message }, { status: 403 });
+  return HttpResponse.json({ code: "FORBIDDEN", message, details: null }, { status: 403 });
 }
 
 function readParam(value: string | readonly string[] | undefined) {
@@ -59,8 +62,10 @@ export const handlers = [
     if (!user || payload.password !== "123456") {
       return HttpResponse.json(
         {
+          code: "UNAUTHORIZED",
           message:
             "账号或密码不正确。开发模式可使用 member / maintainer / stock / admin，密码统一为 123456。",
+          details: null,
         },
         { status: 401 },
       );
@@ -80,10 +85,21 @@ export const handlers = [
 
     const payload = await jsonBody<RegisterRequest>(request);
     if (payload.password !== payload.confirmPassword) {
-      return HttpResponse.json({ message: "两次密码输入不一致" }, { status: 400 });
+      return HttpResponse.json(
+        {
+          code: "VALIDATION_FAILED",
+          message: "两次密码输入不一致",
+          details: null,
+        },
+        { status: 400 },
+      );
     }
 
-    return HttpResponse.json({ ok: true });
+    return HttpResponse.json({
+      ok: true,
+      canLoginNow: true,
+      nextAction: "login",
+    });
   }),
 
   http.post("/api/auth/logout", async () => {
@@ -207,7 +223,9 @@ export const handlers = [
     } catch (error) {
       return HttpResponse.json(
         {
+          code: "VALIDATION_FAILED",
           message: error instanceof Error ? error.message : "认领失败",
+          details: null,
         },
         { status: 400 },
       );
@@ -228,7 +246,9 @@ export const handlers = [
     } catch (error) {
       return HttpResponse.json(
         {
+          code: "VALIDATION_FAILED",
           message: error instanceof Error ? error.message : "创建失败",
+          details: null,
         },
         { status: 400 },
       );
@@ -261,7 +281,9 @@ export const handlers = [
     } catch (error) {
       return HttpResponse.json(
         {
+          code: "VALIDATION_FAILED",
           message: error instanceof Error ? error.message : "保存失败",
+          details: null,
         },
         { status: 400 },
       );

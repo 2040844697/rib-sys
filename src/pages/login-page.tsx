@@ -7,7 +7,7 @@ import { ArrowRight } from "lucide-react";
 import { z } from "zod";
 
 import { authStore, useAuthState } from "@/lib/auth-store";
-import { runtimeModeLabel } from "@/lib/runtime";
+import { isDevelopment, runtimeModeLabel } from "@/lib/runtime";
 import { Button, Field, Panel, TextInput } from "@/components/ui";
 
 const loginSchema = z.object({
@@ -27,6 +27,7 @@ const demoAccounts = [
 export function LoginPage() {
   const auth = useAuthState();
   const navigate = useNavigate();
+  const showDevAccounts = isDevelopment;
 
   const {
     register,
@@ -36,8 +37,8 @@ export function LoginPage() {
   } = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
-      account: "member",
-      password: "123456",
+      account: "",
+      password: "",
     },
   });
 
@@ -69,32 +70,42 @@ export function LoginPage() {
             但角色差异、状态标签和响应式结构已经预留好了。
           </p>
 
-          <div className="mt-8 grid gap-3 sm:grid-cols-2">
-            {demoAccounts.map((item) => (
-              <button
-                key={item.account}
-                type="button"
-                className="rounded-[24px] border border-white/80 bg-white/78 p-4 text-left transition hover:bg-white"
-                onClick={() => {
-                  setValue("account", item.account, { shouldValidate: true });
-                  setValue("password", "123456", { shouldValidate: true });
-                }}
-              >
-                <div className="text-sm font-semibold text-slate-900">{item.label}</div>
-                <div className="mt-1 text-xs text-slate-500">
-                  账号 {item.account} / 密码 123456
-                </div>
-              </button>
-            ))}
-          </div>
+          {showDevAccounts ? (
+            <div className="mt-8 space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                开发态快捷账号
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {demoAccounts.map((item) => (
+                  <button
+                    key={item.account}
+                    type="button"
+                    className="rounded-[24px] border border-white/80 bg-white/78 p-4 text-left transition hover:bg-white"
+                    onClick={() => {
+                      setValue("account", item.account, { shouldValidate: true });
+                      setValue("password", "123456", { shouldValidate: true });
+                    }}
+                  >
+                    <div className="text-sm font-semibold text-slate-900">{item.label}</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      账号 {item.account} / 密码 123456
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs leading-6 text-slate-500">
+                这里只在开发环境显示，方便本地 mock 或后端种子账号联调；生产环境不会默认暴露这些提示。
+              </p>
+            </div>
+          ) : null}
         </Panel>
 
         <Panel className="p-6 lg:p-8">
           <div className="space-y-2">
             <h2 className="text-2xl font-semibold text-slate-900">登录系统</h2>
             <p className="text-sm text-slate-600">
-              当前接入的是 {runtimeModeLabel}。开发种子账号支持快速切换
-              member / maintainer / stock / admin 四种角色，默认密码统一为 123456。
+              当前接入的是 {runtimeModeLabel}。正式环境只需要输入自己的账号和密码；
+              开发态才会额外显示本地联调用的快捷账号。
             </p>
           </div>
 

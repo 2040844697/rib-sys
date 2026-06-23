@@ -1,4 +1,5 @@
 import { getSessionToken } from "@/lib/session";
+import { isMockEnabled } from "@/lib/runtime";
 import type {
   AdminCapabilitiesResponse,
   BootstrapResponse,
@@ -13,19 +14,42 @@ import type {
   LoginRequest,
   LoginResponse,
   MeResponse,
+  RegisterResponse,
   RegisterRequest,
   UpdateMePayload,
 } from "@/types";
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
+  details?: unknown;
   payload: unknown;
 
-  constructor(message: string, status: number, payload: unknown) {
+  constructor(
+    message: string,
+    status: number,
+    payload: unknown,
+    code?: string,
+    details?: unknown,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
+    this.details = details;
     this.payload = payload;
+  }
+}
+
+function tryParseJson(rawText: string) {
+  if (!rawText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawText) as unknown;
+  } catch {
+    return rawText;
   }
 }
 
@@ -43,7 +67,9 @@ async function fetchJson<T>(
   const sessionToken = getSessionToken();
   if (sessionToken) {
     headers.set("X-Session-Token", sessionToken);
-    headers.set("X-Mock-Session", sessionToken);
+    if (isMockEnabled) {
+      headers.set("X-Mock-Session", sessionToken);
+    }
   }
 
   const response = await fetch(path, {
@@ -53,7 +79,7 @@ async function fetchJson<T>(
   });
 
   const rawText = await response.text();
-  const payload = rawText ? (JSON.parse(rawText) as unknown) : null;
+  const payload = tryParseJson(rawText);
 
   if (!response.ok) {
     const message =
@@ -64,7 +90,20 @@ async function fetchJson<T>(
         ? payload.message
         : "请求失败";
 
-    throw new ApiError(message, response.status, payload);
+    const code =
+      typeof payload === "object" &&
+      payload !== null &&
+      "code" in payload &&
+      typeof payload.code === "string"
+        ? payload.code
+        : undefined;
+
+    const details =
+      typeof payload === "object" && payload !== null && "details" in payload
+        ? payload.details
+        : undefined;
+
+    throw new ApiError(message, response.status, payload, code, details);
   }
 
   return payload as T;
@@ -78,7 +117,7 @@ export const api = {
     });
   },
   register(payload: RegisterRequest) {
-    return fetchJson<{ ok: true }>("/api/auth/register", {
+    return fetchJson<RegisterResponse>("/api/auth/register", {
       method: "POST",
       bodyJson: payload,
     });

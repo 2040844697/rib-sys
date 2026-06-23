@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { api } from "@/lib/api";
 import { useAuthState } from "@/lib/auth-store";
-import { isMockEnabled } from "@/lib/runtime";
+import type { RegisterResponse } from "@/types";
 import { Button, Field, Panel, TextInput } from "@/components/ui";
 
 const registerSchema = z
@@ -27,7 +27,10 @@ type RegisterFormValues = z.infer<typeof registerSchema>;
 
 export function RegisterPage() {
   const auth = useAuthState();
-  const [submitted, setSubmitted] = useState(false);
+  const [submittedResult, setSubmittedResult] = useState<{
+    response: RegisterResponse;
+    qqNumber: string;
+  } | null>(null);
 
   const {
     register,
@@ -46,8 +49,11 @@ export function RegisterPage() {
 
   const registerMutation = useMutation({
     mutationFn: (values: RegisterFormValues) => api.register(values),
-    onSuccess: () => {
-      setSubmitted(true);
+    onSuccess: (response, values) => {
+      setSubmittedResult({
+        response,
+        qqNumber: values.qqNumber,
+      });
     },
   });
 
@@ -70,13 +76,14 @@ export function RegisterPage() {
           </p>
         </div>
 
-        {submitted ? (
+        {submittedResult ? (
           <div className="mt-6 rounded-[24px] bg-emerald-50 p-5 text-emerald-700">
             <div className="text-lg font-semibold">提交成功</div>
             <p className="mt-2 text-sm">
-              {isMockEnabled
-                ? "当前是 mock 模式，这次提交只会模拟成功返回，不会真的创建账号。"
-                : "账号已创建成功。第一阶段默认会直接创建为普通成员，可使用 QQ 号和刚设置的密码登录。"}
+              {submittedResult.response.canLoginNow === false ||
+              submittedResult.response.nextAction === "wait_review"
+                ? "注册申请已提交，当前账号暂时还不能立即登录。后续如果后端切到审核模式，这里会继续沿用这一种提示。"
+                : `账号已创建成功。你可以使用 QQ 号 ${submittedResult.qqNumber} 和刚设置的密码直接登录。`}
             </p>
           </div>
         ) : null}

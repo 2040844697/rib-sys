@@ -8,8 +8,8 @@
     "dev:mock": "vite --mode mock",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "server": "python -m server.app",
-    "server:dev": "python -m server.app"
+    "server": ".venv\\Scripts\\python.exe -m server.app",
+    "server:dev": ".venv\\Scripts\\python.exe -m server.app"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

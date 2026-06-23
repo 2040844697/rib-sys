@@ -24,6 +24,9 @@ export interface LoginResponse {
   roles: UserRole[];
   next: string;
   sessionToken: string;
+  session?: {
+    expiresAt: string;
+  };
 }
 
 export interface RegisterRequest {
@@ -32,6 +35,13 @@ export interface RegisterRequest {
   groupNickname: string;
   password: string;
   confirmPassword: string;
+}
+
+export interface RegisterResponse {
+  ok: true;
+  userId?: string;
+  canLoginNow?: boolean;
+  nextAction?: "login" | "wait_review";
 }
 
 export interface BootstrapResponse {
