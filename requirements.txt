@@ -1,5 +1,2 @@
-# RibSys backend currently uses only Python standard library modules.
-# This file is kept so the Python environment has a conventional entrypoint.
-#
-# If we later add FastAPI, SQLAlchemy, Pydantic, pytest, etc.,
-# we can pin them here directly.
+# PostgreSQL bootstrap on service startup
+psycopg[binary]>=3.2,<3.3

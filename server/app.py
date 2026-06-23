@@ -14,18 +14,25 @@ if __package__ in {None, ""}:
     if str(ROOT_DIR) not in sys.path:
         sys.path.insert(0, str(ROOT_DIR))
 
+    from server.auth import AuthModule, ensure_identity_seed
     from server.config import load_config
+    from server.db_bootstrap import initialize_database_schema
     from server.errors import AppError
     from server.store import create_store
 else:
+    from .auth import AuthModule, ensure_identity_seed
     from .config import load_config
+    from .db_bootstrap import initialize_database_schema
     from .errors import AppError
     from .store import create_store
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG = load_config(ROOT_DIR)
+DB_BOOTSTRAP = initialize_database_schema(CONFIG)
 STORE = create_store(CONFIG)
+AUTH = AuthModule(CONFIG)
+IDENTITY_BOOTSTRAP = ensure_identity_seed(CONFIG, audit_store=STORE)
 
 
 def read_session_token(headers) -> str | None:
@@ -76,10 +83,19 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise AppError(400, "请求体不是合法 JSON", "INVALID_JSON") from exc
 
     def _require_user(self) -> dict[str, Any]:
-        user = STORE.get_user_by_session_token(read_session_token(self.headers))
+        session_token = read_session_token(self.headers)
+        user = AUTH.get_user_by_session_token(session_token) if AUTH.is_enabled() else None
+        if user is None:
+            user = STORE.get_user_by_session_token(session_token)
         if user is None:
             raise AppError(401, "请先登录", "UNAUTHORIZED")
         return user
+
+    def _client_ip(self) -> str | None:
+        forwarded = self.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return self.client_address[0] if self.client_address else None
 
     def do_OPTIONS(self) -> None:
         self._write_empty(HTTPStatus.NO_CONTENT)
@@ -124,23 +140,51 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
 
             if self.command == "GET" and path == "/api/health":
-                self._write_json(HTTPStatus.OK, STORE.get_health())
+                self._write_json(
+                    HTTPStatus.OK,
+                    AUTH.get_health() if AUTH.is_enabled() else STORE.get_health(),
+                )
                 return
 
             if self.command == "POST" and path == "/api/auth/login":
-                self._write_json(HTTPStatus.OK, STORE.login(self._read_json_body()))
+                payload = self._read_json_body()
+                result = (
+                    AUTH.login(
+                        payload,
+                        created_ip=self._client_ip(),
+                        user_agent=self.headers.get("User-Agent"),
+                        audit_store=STORE,
+                    )
+                    if AUTH.is_enabled()
+                    else STORE.login(payload)
+                )
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             if self.command == "POST" and path == "/api/auth/register":
-                self._write_json(HTTPStatus.OK, STORE.register_user(self._read_json_body()))
+                payload = self._read_json_body()
+                result = (
+                    AUTH.register_user(payload, shadow_store=STORE, audit_store=STORE)
+                    if AUTH.is_enabled()
+                    else STORE.register_user(payload)
+                )
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             if self.command == "POST" and path == "/api/auth/logout":
-                self._write_json(HTTPStatus.OK, STORE.logout(read_session_token(self.headers)))
+                session_token = read_session_token(self.headers)
+                result = (
+                    AUTH.logout(session_token, audit_store=STORE)
+                    if AUTH.is_enabled()
+                    else STORE.logout(session_token)
+                )
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             if self.command == "GET" and path == "/api/app/bootstrap":
-                self._write_json(HTTPStatus.OK, STORE.build_bootstrap(self._require_user()))
+                current_user = self._require_user()
+                result = AUTH.build_bootstrap(current_user) if AUTH.is_enabled() else STORE.build_bootstrap(current_user)
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             if self.command == "GET" and path == "/api/app/groups":
@@ -200,15 +244,200 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if self.command == "POST" and path == "/api/order-screenshots":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.add_order_screenshot(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/group-buy-records/mark-ordered":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.mark_records_ordered(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/international-batches":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.create_international_batch(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            match = re.fullmatch(r"/api/international-batches/([^/]+)/records", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.add_records_to_international_batch(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/international-batches/([^/]+)/shipping", path)
+            if self.command == "PATCH" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.update_international_batch_shipping(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/international-batches/([^/]+)/arrive-domestic", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.record_international_batch_arrived_domestic(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/international-batches/([^/]+)/fees", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.record_international_batch_fees(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/file-objects":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.create_upload_object(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            match = re.fullmatch(r"/api/file-objects/([^/]+)/void", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.void_file_object(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/audit-logs":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.list_audit_logs(
+                        self._require_user(),
+                        {
+                            "objectType": query.get("object_type", [None])[0],
+                            "objectId": query.get("object_id", [None])[0],
+                            "actorUserId": query.get("actor_user_id", [None])[0],
+                            "action": query.get("action", [None])[0],
+                            "createdFrom": query.get("created_from", [None])[0],
+                            "createdTo": query.get("created_to", [None])[0],
+                            "page": query.get("page", [None])[0],
+                            "pageSize": query.get("page_size", [None])[0],
+                        },
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/goods":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.search_goods(
+                        self._require_user(),
+                        {
+                            "keyword": query.get("keyword", [None])[0],
+                            "seriesName": query.get("series_name", [None])[0]
+                            or query.get("seriesName", [None])[0],
+                            "alias": query.get("alias", [None])[0],
+                            "characterName": query.get("character_name", [None])[0]
+                            or query.get("characterName", [None])[0],
+                            "status": query.get("status", [None])[0],
+                            "page": query.get("page", [None])[0],
+                            "pageSize": query.get("page_size", [None])[0]
+                            or query.get("pageSize", [None])[0],
+                        },
+                    ),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/goods":
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.create_goods(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            match = re.fullmatch(r"/api/goods/([^/]+)", path)
+            if self.command == "PATCH" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.update_goods(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/goods/([^/]+)/images", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.add_goods_image(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/goods/([^/]+)/images/([^/]+)/primary", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.set_primary_goods_image(
+                        self._require_user(),
+                        match.group(1),
+                        match.group(2),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/goods/([^/]+)/snapshot", path)
+            if self.command == "GET" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    STORE.get_goods_snapshot(self._require_user(), match.group(1)),
+                )
+                return
+
             if self.command == "GET" and path == "/api/me":
-                self._write_json(HTTPStatus.OK, STORE.read_me(self._require_user()))
+                current_user = self._require_user()
+                result = AUTH.read_me(current_user) if AUTH.is_enabled() else STORE.read_me(current_user)
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             if self.command == "PATCH" and path == "/api/me":
-                self._write_json(
-                    HTTPStatus.OK,
-                    STORE.update_me(self._require_user(), self._read_json_body()),
-                )
+                current_user = self._require_user()
+                payload = self._read_json_body()
+                if AUTH.is_enabled():
+                    payload["__shadowStore"] = STORE
+                    result = AUTH.update_me(current_user, payload, audit_store=STORE)
+                else:
+                    result = STORE.update_me(current_user, payload)
+                self._write_json(HTTPStatus.OK, result)
                 return
 
             raise AppError(404, "接口不存在", "NOT_FOUND")
@@ -231,6 +460,19 @@ def main() -> None:
 
     print(f"[ribsys-api] listening on http://{CONFIG.host}:{CONFIG.port}")
     print(f"[ribsys-api] data file: {CONFIG.data_file}")
+    if CONFIG.database_url:
+        suffix = DB_BOOTSTRAP.checksum[:12] if DB_BOOTSTRAP.checksum else "-"
+        print(
+            f"[ribsys-api] database bootstrap: {DB_BOOTSTRAP.reason} "
+            f"(applied={DB_BOOTSTRAP.applied}, checksum={suffix})"
+        )
+        print(
+            "[ribsys-api] identity bootstrap: "
+            f"seededAdmin={IDENTITY_BOOTSTRAP['seededAdmin']}, "
+            f"seededDemoUsers={IDENTITY_BOOTSTRAP['seededDemoUsers']}"
+        )
+    else:
+        print("[ribsys-api] database bootstrap: skipped (DATABASE_URL not configured)")
     if STORE.startup_info["createdFreshData"]:
         print("[ribsys-api] first start detected, seed data has been written.")
     print(

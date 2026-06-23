@@ -10,6 +10,10 @@ from typing import Any
 
 from .config import Config
 from .errors import AppError
+from .file_audit import AuditService, FileService, ensure_file_audit_state
+from .goods_catalog import GoodsCatalogModule, ensure_goods_catalog_state
+from .group_buy_records import GroupBuyRecordsModule, ensure_group_buy_record_state
+from .order_logistics import OrderLogisticsModule, ensure_order_logistics_state
 
 
 ACTIVE_GROUP_BUY_STATUSES = {"拼拼拼", "已切"}
@@ -24,6 +28,9 @@ ROLE_PERMISSIONS = {
         "charge:view_self",
     ],
     "group_buy_maintainer": [
+        "goods:create",
+        "goods:update",
+        "goods:view",
         "group_buy:create",
         "group_buy:update_own",
         "group_buy:update_any",
@@ -34,7 +41,7 @@ ROLE_PERMISSIONS = {
         "charge:view_group",
         "charge:adjust",
     ],
-    "stock_keeper": ["dispatch:process_assigned", "warehouse:view"],
+    "stock_keeper": ["dispatch:process_assigned", "warehouse:view", "goods:view"],
     "admin": ["group:edit", "member:manage", "audit:view", "user:manage", "role:manage"],
 }
 
@@ -214,10 +221,13 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         "updatedAt": timestamp,
         "counters": {
             "user": len(users),
+            "goods": 0,
+            "goodsImage": 0,
             "groupBuy": 5,
             "groupBuyItem": 5,
             "groupBuyRecord": 5,
             "userAlias": 0,
+            "fileObject": 0,
             "auditLog": 0,
         },
         "groups": [
@@ -388,60 +398,63 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         "groupBuyRecords": [
             {
                 "id": "record_1",
-                "ownerId": "user_member",
+                "memberUserId": "user_member",
                 "groupBuyId": "gb_1",
                 "groupBuyItemId": "gbi_1",
                 "quantity": 1,
-                "displayStatus": "未肾",
+                "status": "未肾",
                 "isException": False,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             },
             {
                 "id": "record_2",
-                "ownerId": "user_maintainer",
+                "memberUserId": "user_maintainer",
                 "groupBuyId": "gb_1",
                 "groupBuyItemId": "gbi_2",
                 "quantity": 2,
-                "displayStatus": "未补国际",
+                "status": "未补国际",
                 "isException": False,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             },
             {
                 "id": "record_3",
-                "ownerId": "user_guest_a",
+                "memberUserId": "user_guest_a",
                 "groupBuyId": "gb_1",
                 "groupBuyItemId": "gbi_1",
                 "quantity": 5,
-                "displayStatus": "未到货",
+                "status": "未到货",
                 "isException": False,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             },
             {
                 "id": "record_4",
-                "ownerId": "user_guest_b",
+                "memberUserId": "user_guest_b",
                 "groupBuyId": "gb_1",
                 "groupBuyItemId": "gbi_3",
                 "quantity": 4,
-                "displayStatus": "可排发",
+                "status": "可排发",
                 "isException": False,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             },
             {
                 "id": "record_5",
-                "ownerId": "user_stock",
+                "memberUserId": "user_stock",
                 "groupBuyId": "gb_3",
                 "groupBuyItemId": "gbi_5",
                 "quantity": 1,
-                "displayStatus": "已申请排发",
+                "status": "已申请排发",
                 "isException": False,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
             },
         ],
+        "goods": [],
+        "goodsImages": [],
+        "fileObjects": [],
         "auditLogs": [],
     }
 
@@ -452,6 +465,51 @@ class Store:
         self.state = state
         self.created_fresh_data = created_fresh_data
         self.sessions: dict[str, dict[str, Any]] = {}
+        ensure_file_audit_state(self.state)
+        ensure_goods_catalog_state(self.state)
+        ensure_group_buy_record_state(self.state)
+        ensure_order_logistics_state(self.state)
+        self.audit_service = AuditService(
+            state=self.state,
+            next_id=self.next_id,
+            can_list_logs=self.can_list_audit_logs,
+            can_view_log=self.can_view_audit_log,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+        )
+        self.file_service = FileService(
+            state=self.state,
+            next_id=self.next_id,
+            audit_service=self.audit_service,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            now_iso=utc_now_iso,
+        )
+        self.goods_catalog_module = GoodsCatalogModule(
+            state=self.state,
+            next_id=self.next_id,
+            audit_log=self.audit_service.log,
+            now_iso=utc_now_iso,
+        )
+        self.group_buy_records_module = GroupBuyRecordsModule(
+            state=self.state,
+            next_id=self.next_id,
+            audit_log=self.audit_service.log,
+            now_iso=utc_now_iso,
+            has_permission=has_permission,
+            can_view_group_buy=self.can_view_group_buy,
+        )
+        self.order_logistics_module = OrderLogisticsModule(
+            state=self.state,
+            next_id=self.next_id,
+            audit_log=self.audit_service.log,
+            now_iso=utc_now_iso,
+            assert_manage_permission=self.assert_order_logistics_permission,
+            get_group_buy_for_write=self.get_group_buy_for_write,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            require_active_file_object=self.file_service.require_active_file_object,
+            mark_ordered=self.group_buy_records_module.mark_ordered,
+            enter_transfer_flow=self.group_buy_records_module.enter_transfer_flow,
+            link_charge=self.group_buy_records_module.link_charge,
+        )
 
     @property
     def startup_info(self) -> dict[str, Any]:
@@ -491,18 +549,14 @@ class Store:
         after: Any,
         reason: str | None,
     ) -> None:
-        self.state["auditLogs"].append(
-            {
-                "id": self.next_id("auditLog", "audit"),
-                "actorUserId": actor_user_id or "system",
-                "action": action,
-                "objectType": object_type,
-                "objectId": object_id,
-                "before": clone(before) if before is not None else None,
-                "after": clone(after) if after is not None else None,
-                "reason": reason,
-                "createdAt": utc_now_iso(),
-            }
+        self.audit_service.log(
+            actor_user_id=actor_user_id,
+            action=action,
+            object_type=object_type,
+            object_id=object_id,
+            before=before,
+            after=after,
+            reason=reason,
         )
 
     def cleanup_expired_sessions(self) -> None:
@@ -515,6 +569,10 @@ class Store:
 
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         return next((user for user in self.state["users"] if user["id"] == user_id), None)
+
+    def get_user_snapshot_by_id(self, user_id: str) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        return self.get_user_snapshot(user) if user is not None else None
 
     def get_group_by_id(self, group_id: str) -> dict[str, Any] | None:
         return next((group for group in self.state["groups"] if group["id"] == group_id), None)
@@ -531,18 +589,13 @@ class Store:
         ]
 
     def get_my_records(self, group_buy_id: str, user_id: str) -> list[dict[str, Any]]:
-        return [
-            record
-            for record in self.state["groupBuyRecords"]
-            if record["groupBuyId"] == group_buy_id and record["ownerId"] == user_id
-        ]
+        return self.group_buy_records_module.list_member_records(
+            group_buy_id=group_buy_id,
+            member_user_id=user_id,
+        )
 
     def get_claimed_quantity(self, group_buy_item_id: str) -> int:
-        return sum(
-            record["quantity"]
-            for record in self.state["groupBuyRecords"]
-            if record["groupBuyItemId"] == group_buy_item_id
-        )
+        return self.group_buy_records_module.get_claimed_quantity(group_buy_item_id)
 
     def get_user_snapshot(self, user: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -556,6 +609,42 @@ class Store:
 
     def can_view_group(self, user: dict[str, Any], group: dict[str, Any]) -> bool:
         return "admin" in user["roles"] or user["id"] in group["memberIds"]
+
+    def can_view_group_buy(self, user: dict[str, Any], group_buy: dict[str, Any]) -> bool:
+        group = self.get_group_by_id(group_buy["groupId"])
+        return group is not None and self.can_view_group(user, group)
+
+    def can_list_audit_logs(self, user: dict[str, Any]) -> bool:
+        return has_permission(user, "audit:view")
+
+    def can_view_audit_log(self, user: dict[str, Any], log: dict[str, Any]) -> bool:
+        if has_permission(user, "audit:view"):
+            return True
+
+        actor_user_id = log.get("actorUserId")
+        return actor_user_id == user["id"]
+
+    def can_view_goods_catalog(self, user: dict[str, Any]) -> bool:
+        return has_permission(user, "goods:view")
+
+    def assert_goods_permission(self, user: dict[str, Any], permission: str) -> None:
+        if not has_permission(user, permission):
+            raise AppError(403, "当前账号没有商品图鉴权限", "FORBIDDEN")
+
+    def require_order_logistics_user(self, actor_user_id: str) -> dict[str, Any]:
+        user = self.get_user_by_id(actor_user_id)
+        if user is None:
+            raise AppError(404, "用户不存在", "NOT_FOUND")
+        if not has_role(user, ["group_buy_maintainer", "admin"]):
+            raise AppError(403, "当前账号没有下单转运维护权限", "FORBIDDEN")
+        return user
+
+    def assert_order_logistics_permission(self, actor_user_id: str) -> None:
+        self.require_order_logistics_user(actor_user_id)
+
+    def get_group_buy_for_write(self, actor_user_id: str, group_buy_id: str) -> dict[str, Any]:
+        user = self.require_order_logistics_user(actor_user_id)
+        return self.require_visible_group_buy(user, group_buy_id)
 
     def require_visible_group(self, user: dict[str, Any], group_id: str) -> dict[str, Any]:
         group = self.get_group_by_id(group_id)
@@ -576,7 +665,187 @@ class Store:
             "groups": len(self.state["groups"]),
             "users": len(self.state["users"]),
             "groupBuys": len(self.state["groupBuys"]),
+            "goods": len(self.state["goods"]),
+            "goodsImages": len(self.state["goodsImages"]),
+            "fileObjects": len(self.state["fileObjects"]),
+            "auditLogs": len(self.state["auditLogs"]),
+            "orderScreenshots": len(self.state["orderScreenshots"]),
+            "internationalBatches": len(self.state["internationalBatches"]),
+            "internationalBatchRecords": len(self.state["internationalBatchRecords"]),
+            "internationalFeeAllocations": len(self.state["internationalFeeAllocations"]),
         }
+
+    def sync_registered_user(self, user: dict[str, Any]) -> None:
+        existing = self.get_user_by_id(user["id"])
+        if existing is None:
+            self.state["users"].append(clone(user))
+        else:
+            existing.update(clone(user))
+
+        default_group = self.get_group_by_id(user.get("groupId") or "group_1")
+        # 业务页仍然依赖 memberIds，可见性在这里顺手补齐。
+        if default_group and user["id"] not in default_group["memberIds"]:
+            default_group["memberIds"].append(user["id"])
+            default_group["updatedAt"] = utc_now_iso()
+
+        self.persist()
+
+    def sync_user_profile(self, *, user_id: str, display_name: str, group_nickname: str) -> None:
+        user = self.get_user_by_id(user_id)
+        if user is None:
+            return
+
+        # 这里只同步前端仍会读取的展示字段，避免影子数据再次长成主数据源。
+        user["displayName"] = display_name
+        user["groupNickname"] = group_nickname
+        user["updatedAt"] = utc_now_iso()
+        self.persist()
+
+    def create_upload_object(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.file_service.create_upload_object(
+            uploaded_by=user["id"],
+            bucket=payload.get("bucket"),
+            object_key=payload.get("objectKey"),
+            url=payload.get("url"),
+            content_type=payload.get("contentType"),
+            size_bytes=payload.get("sizeBytes"),
+        )
+        self.persist()
+        return result
+
+    def void_file_object(
+        self,
+        user: dict[str, Any],
+        file_object_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.file_service.void_file_object(
+            actor_user_id=user["id"],
+            file_object_id=file_object_id,
+            reason=payload.get("reason"),
+        )
+        self.persist()
+        return result
+
+    def list_audit_logs(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
+        return self.audit_service.list_logs(user, filters)
+
+    def add_order_screenshot(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.order_logistics_module.add_order_screenshot(user["id"], payload)
+        self.persist()
+        return result
+
+    def mark_records_ordered(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.order_logistics_module.mark_records_ordered(user["id"], payload)
+        self.persist()
+        return result
+
+    def create_international_batch(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.order_logistics_module.create_international_batch(user["id"], payload)
+        self.persist()
+        return result
+
+    def add_records_to_international_batch(
+        self,
+        user: dict[str, Any],
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.order_logistics_module.add_records_to_batch(user["id"], batch_id, payload)
+        self.persist()
+        return result
+
+    def update_international_batch_shipping(
+        self,
+        user: dict[str, Any],
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.order_logistics_module.update_batch_shipping(user["id"], batch_id, payload)
+        self.persist()
+        return result
+
+    def record_international_batch_arrived_domestic(
+        self,
+        user: dict[str, Any],
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.order_logistics_module.record_batch_arrived_domestic(user["id"], batch_id, payload)
+        self.persist()
+        return result
+
+    def record_international_batch_fees(
+        self,
+        user: dict[str, Any],
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self.order_logistics_module.record_batch_fees(user["id"], batch_id, payload)
+        self.persist()
+        return result
+
+    def create_goods(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:create")
+        result = self.goods_catalog_module.create_goods(
+            actor_user_id=user["id"],
+            payload=payload,
+        )
+        self.persist()
+        return result
+
+    def update_goods(
+        self,
+        user: dict[str, Any],
+        goods_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:update")
+        result = self.goods_catalog_module.update_goods(
+            actor_user_id=user["id"],
+            goods_id=goods_id,
+            payload=payload,
+        )
+        self.persist()
+        return result
+
+    def add_goods_image(
+        self,
+        user: dict[str, Any],
+        goods_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:update")
+        result = self.goods_catalog_module.add_goods_image(
+            actor_user_id=user["id"],
+            goods_id=goods_id,
+            payload=payload,
+        )
+        self.persist()
+        return result
+
+    def set_primary_goods_image(
+        self,
+        user: dict[str, Any],
+        goods_id: str,
+        goods_image_id: str,
+    ) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:update")
+        result = self.goods_catalog_module.set_primary_goods_image(
+            actor_user_id=user["id"],
+            goods_id=goods_id,
+            goods_image_id=goods_image_id,
+        )
+        self.persist()
+        return result
+
+    def get_goods_snapshot(self, user: dict[str, Any], goods_id: str) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:view")
+        return self.goods_catalog_module.get_goods_snapshot(goods_id)
+
+    def search_goods(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
+        self.assert_goods_permission(user, "goods:view")
+        return self.goods_catalog_module.search_goods(filters)
 
     def build_bootstrap(self, user: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -638,15 +907,13 @@ class Store:
                     if group_buy["groupId"] == group["id"]
                     and group_buy["status"] in ACTIVE_GROUP_BUY_STATUSES
                 ),
-                "myPendingPaymentCount": sum(
-                    1
-                    for record in self.state["groupBuyRecords"]
-                    if record["ownerId"] == user["id"] and record["displayStatus"] == "未肾"
+                "myPendingPaymentCount": self.group_buy_records_module.count_member_records_by_status(
+                    member_user_id=user["id"],
+                    status="未肾",
                 ),
-                "myDispatchableCount": sum(
-                    1
-                    for record in self.state["groupBuyRecords"]
-                    if record["ownerId"] == user["id"] and record["displayStatus"] == "可排发"
+                "myDispatchableCount": self.group_buy_records_module.count_member_records_by_status(
+                    member_user_id=user["id"],
+                    status="可排发",
                 ),
             },
         }
@@ -707,6 +974,12 @@ class Store:
         return {
             "modules": [
                 {
+                    "key": "goods_catalog",
+                    "title": "鍟嗗搧鍥鹃壌",
+                    "description": "缁存姢鍟嗗搧璧勬枡銆佸埆鍚嶅拰涓诲浘",
+                    "enabled": has_permission(user, "goods:view"),
+                },
+                {
                     "key": "group_buys",
                     "title": "拼团管理",
                     "description": "新建、编辑和查看拼团",
@@ -722,6 +995,12 @@ class Store:
                     "key": "payments",
                     "title": "费用付款",
                     "description": "维护尾款、国际费和付款状态",
+                    "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
+                },
+                {
+                    "key": "order_logistics",
+                    "title": "下单转运",
+                    "description": "维护下单截图、国际批次和费用分摊",
                     "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
                 },
                 {
@@ -965,92 +1244,18 @@ class Store:
         return {"groupBuyId": next_group_buy["id"]}
 
     def claim_group_buy_item(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        if not has_permission(user, "record:create_self"):
-            raise AppError(403, "当前账号没有认领权限", "FORBIDDEN")
-
-        group_buy_id = normalize_text(payload.get("groupBuyId"), "拼团")
-        group_buy_item_id = normalize_text(payload.get("groupBuyItemId"), "拼团商品")
-        quantity = payload.get("quantity")
-
-        if not isinstance(quantity, int) or quantity <= 0:
-            raise AppError(400, "认领数量必须大于 0", "VALIDATION_FAILED")
-
-        group_buy = self.require_visible_group_buy(user, group_buy_id)
-        if group_buy["status"] not in CLAIMABLE_GROUP_BUY_STATUSES:
-            raise AppError(400, "当前拼团状态暂时不能认领", "INVALID_STATUS")
-
-        item = next(
-            (entry for entry in self.get_group_buy_items(group_buy_id) if entry["id"] == group_buy_item_id),
-            None,
-        )
-        if item is None:
-            raise AppError(404, "拼团商品不存在", "NOT_FOUND")
-
-        available_quantity = item["totalQuantity"] - self.get_claimed_quantity(item["id"])
-        if quantity > available_quantity:
-            raise AppError(400, "可认领数量不足", "INSUFFICIENT_STOCK")
-
-        existing_record = next(
-            (
-                record
-                for record in self.state["groupBuyRecords"]
-                if record["ownerId"] == user["id"]
-                and record["groupBuyId"] == group_buy_id
-                and record["groupBuyItemId"] == group_buy_item_id
-            ),
-            None,
-        )
-
-        if existing_record is not None:
-            before = clone(existing_record)
-            existing_record["quantity"] += quantity
-            existing_record["displayStatus"] = "未肾"
-            existing_record["updatedAt"] = utc_now_iso()
-
-            self.create_audit_log(
-                actor_user_id=user["id"],
-                action="record.update_quantity",
-                object_type="group_buy_record",
-                object_id=existing_record["id"],
-                before=before,
-                after=existing_record,
-                reason="成员追加认领",
-            )
-            self.persist()
-            return {
-                "recordId": existing_record["id"],
-                "displayStatus": existing_record["displayStatus"],
-            }
-
-        next_record = {
-            "id": self.next_id("groupBuyRecord", "record"),
-            "ownerId": user["id"],
-            "groupBuyId": group_buy_id,
-            "groupBuyItemId": group_buy_item_id,
-            "quantity": quantity,
-            "displayStatus": "未肾",
-            "isException": False,
-            "createdAt": utc_now_iso(),
-            "updatedAt": utc_now_iso(),
-        }
-        self.state["groupBuyRecords"].append(next_record)
-
-        self.create_audit_log(
-            actor_user_id=user["id"],
-            action="record.create",
-            object_type="group_buy_record",
-            object_id=next_record["id"],
-            before=None,
-            after=next_record,
-            reason="成员认领商品",
-        )
+        result = self.group_buy_records_module.create_record(user, payload)
         self.persist()
-        return {"recordId": next_record["id"], "displayStatus": next_record["displayStatus"]}
+        return {
+            "recordId": result["recordId"],
+            "displayStatus": result["displayStatus"],
+        }
 
 
 def create_store(config: Config) -> Store:
     data_file: Path = config.data_file
     data_file.parent.mkdir(parents=True, exist_ok=True)
+    needs_persist = False
 
     if data_file.exists():
         state = json.loads(data_file.read_text(encoding="utf-8"))
@@ -1063,4 +1268,14 @@ def create_store(config: Config) -> Store:
             encoding="utf-8",
         )
 
-    return Store(config, state, created_fresh_data)
+    if ensure_file_audit_state(state):
+        needs_persist = True
+    if ensure_group_buy_record_state(state):
+        needs_persist = True
+    if ensure_order_logistics_state(state):
+        needs_persist = True
+
+    store = Store(config, state, created_fresh_data)
+    if needs_persist and not created_fresh_data:
+        store.persist()
+    return store
