@@ -12,9 +12,15 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def _load_env_file(path: Path) -> None:
+def _load_env_file(
+    path: Path,
+    *,
+    protected_keys: set[str],
+    override: bool = False,
+) -> set[str]:
+    loaded_keys: set[str] = set()
     if not path.exists():
-        return
+        return loaded_keys
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -23,10 +29,32 @@ def _load_env_file(path: Path) -> None:
 
         key, value = line.split("=", 1)
         env_key = key.strip()
-        if not env_key or env_key in os.environ:
+        if not env_key or env_key in protected_keys:
+            continue
+        if env_key in os.environ and not override:
             continue
 
         os.environ[env_key] = _strip_quotes(value.strip())
+        loaded_keys.add(env_key)
+
+    return loaded_keys
+
+
+def _describe_env_source(
+    env_key: str,
+    *,
+    protected_keys: set[str],
+    dotenv_keys: set[str],
+    dotenv_local_keys: set[str],
+    fallback: str,
+) -> str:
+    if env_key in protected_keys:
+        return "process environment"
+    if env_key in dotenv_local_keys:
+        return ".env.local"
+    if env_key in dotenv_keys:
+        return ".env"
+    return fallback
 
 
 def _read_int(value: str | None, fallback: int) -> int:
@@ -129,14 +157,24 @@ class Config:
     db_init_sql_file: Path
     db_bootstrap_admin_db: str
     init_db_on_startup: bool
+    database_url_source: str
+    init_db_on_startup_source: str
     minio_endpoint: str | None
     minio_access_key: str | None
     minio_secret_key: str | None
 
 
 def load_config(root_dir: Path) -> Config:
-    _load_env_file(root_dir / ".env")
-    _load_env_file(root_dir / ".env.local")
+    protected_keys = set(os.environ.keys())
+    dotenv_keys = _load_env_file(
+        root_dir / ".env",
+        protected_keys=protected_keys,
+    )
+    dotenv_local_keys = _load_env_file(
+        root_dir / ".env.local",
+        protected_keys=protected_keys,
+        override=True,
+    )
 
     seed_password = os.environ.get("RIBSYS_SEED_PASSWORD", "123456")
     raw_database_url = os.environ.get("DATABASE_URL")
@@ -159,6 +197,20 @@ def load_config(root_dir: Path) -> Config:
         db_init_sql_file=root_dir / os.environ.get("RIBSYS_DB_INIT_SQL_FILE", "db/init.sql"),
         db_bootstrap_admin_db=os.environ.get("RIBSYS_DB_BOOTSTRAP_ADMIN_DB", "postgres"),
         init_db_on_startup=_read_bool(os.environ.get("RIBSYS_INIT_DB_ON_STARTUP"), True),
+        database_url_source=_describe_env_source(
+            "DATABASE_URL",
+            protected_keys=protected_keys,
+            dotenv_keys=dotenv_keys,
+            dotenv_local_keys=dotenv_local_keys,
+            fallback="unset",
+        ),
+        init_db_on_startup_source=_describe_env_source(
+            "RIBSYS_INIT_DB_ON_STARTUP",
+            protected_keys=protected_keys,
+            dotenv_keys=dotenv_keys,
+            dotenv_local_keys=dotenv_local_keys,
+            fallback="default",
+        ),
         minio_endpoint=os.environ.get("MINIO_ENDPOINT"),
         minio_access_key=os.environ.get("MINIO_ACCESS_KEY"),
         minio_secret_key=os.environ.get("MINIO_SECRET_KEY"),

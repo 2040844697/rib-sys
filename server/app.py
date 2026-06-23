@@ -32,6 +32,11 @@ CONFIG = load_config(ROOT_DIR)
 
 
 def _initialize_database_bootstrap():
+    print(
+        "[ribsys-api] config sources: "
+        f"DATABASE_URL={CONFIG.database_url_source}, "
+        f"RIBSYS_INIT_DB_ON_STARTUP={CONFIG.init_db_on_startup_source}"
+    )
     if CONFIG.database_url:
         print(
             "[ribsys-api] database bootstrap config: "
