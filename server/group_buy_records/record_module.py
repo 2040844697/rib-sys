@@ -736,6 +736,79 @@ class GroupBuyRecordsModule:
         record_ids = self._normalize_record_id_list(payload.get("groupBuyRecordIds"))
         return self._recalculate_many(record_ids, actor_user_id=actor_user_id, reason="排发完成", action="record.mark_completed")
 
+    def mark_dispatch_requested_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        dispatch_request_id: str,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给仓库排发模块在同一事务里写入排发申请 ID 并重算状态。
+        updated_count = 0
+        for record_id in record_ids:
+            before = self._require_record_in_connection(conn, record_id, lock=True)
+            self.repo.mark_dispatch_requested(
+                conn,
+                group_buy_record_id=record_id,
+                dispatch_request_id=dispatch_request_id,
+            )
+            after = self._recalculate_record_status_in_connection(
+                conn,
+                record_id,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                write_audit=False,
+                fact_overrides={"dispatchRequested": True},
+            )
+            self._audit(
+                conn,
+                actor_user_id=actor_user_id,
+                action="record.mark_dispatch_requested",
+                object_type="group_buy_record",
+                object_id=record_id,
+                before=before,
+                after=after,
+                reason=reason,
+            )
+            updated_count += 1
+        return {"updatedCount": updated_count}
+
+    def mark_dispatched_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给仓库排发模块在同一事务里触发已发货状态重算。
+        return self._recalculate_many_in_connection(
+            conn,
+            record_ids,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            action="record.mark_dispatched",
+        )
+
+    def mark_completed_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给仓库排发模块在同一事务里触发完成状态重算。
+        return self._recalculate_many_in_connection(
+            conn,
+            record_ids,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            action="record.mark_completed",
+        )
+
     def mark_transfer_pending_in_connection(
         self,
         conn,

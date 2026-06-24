@@ -632,6 +632,7 @@ class ChargePaymentModule:
                         charge["id"],
                         proof_id=proof_id,
                         actor_user_id=actor_user_id,
+                        conn=conn,
                     )
 
             self.audit_service.log_in_connection(

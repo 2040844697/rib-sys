@@ -11,7 +11,6 @@ from typing import Any
 from .config import Config
 from .errors import AppError
 from .file_audit import AuditService, FileService, ensure_file_audit_state
-from .warehouse_dispatch import WarehouseDispatchModule, ensure_warehouse_dispatch_state
 
 
 ROLE_PERMISSIONS = {
@@ -318,6 +317,21 @@ def remove_transfer_exception_state(state: dict[str, Any]) -> bool:
     return changed
 
 
+def remove_warehouse_dispatch_state(state: dict[str, Any]) -> bool:
+    # 仓库/排发已迁移到 DB，这里只清理旧 JSON 仓库状态。
+    changed = False
+    for key in ("stockItems", "dispatchRequests", "dispatchItems", "domesticShipments"):
+        if key in state:
+            state.pop(key, None)
+            changed = True
+    counters = state.setdefault("counters", {})
+    for key in ("stockItem", "dispatchRequest", "dispatchItem", "domesticShipment"):
+        if key in counters:
+            counters.pop(key, None)
+            changed = True
+    return changed
+
+
 class LegacyJsonRuntime:
     def __init__(self, config: Config, state: dict[str, Any], created_fresh_data: bool):
         self.config = config
@@ -327,7 +341,7 @@ class LegacyJsonRuntime:
         ensure_file_audit_state(self.state)
         remove_order_logistics_state(self.state)
         remove_transfer_exception_state(self.state)
-        ensure_warehouse_dispatch_state(self.state)
+        remove_warehouse_dispatch_state(self.state)
         self.audit_service = AuditService(
             state=self.state,
             next_id=self.next_id,
@@ -341,22 +355,6 @@ class LegacyJsonRuntime:
             audit_service=self.audit_service,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
             now_iso=utc_now_iso,
-        )
-        self.warehouse_dispatch_module = WarehouseDispatchModule(
-            state=self.state,
-            next_id=self.next_id,
-            audit_log=self.audit_service.log,
-            now_iso=utc_now_iso,
-            has_permission_by_user_id=self.has_permission_by_user_id,
-            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            require_group_buy_record=self._database_group_buy_record_dependency_required,
-            build_group_buy_record_summary=self._database_group_buy_record_dependency_required,
-            mark_stocked=self._database_group_buy_record_dependency_required,
-            mark_dispatch_requested=self._database_group_buy_record_dependency_required,
-            mark_dispatched=self._database_group_buy_record_dependency_required,
-            mark_completed=self._database_group_buy_record_dependency_required,
-            link_charge=self._database_group_buy_record_dependency_required,
-            create_charge=self._database_charge_dependency_required,
         )
 
     @property
@@ -496,11 +494,7 @@ class LegacyJsonRuntime:
         proof_id: str | None,
         actor_user_id: str | None,
     ) -> dict[str, Any]:
-        return self.warehouse_dispatch_module.confirm_charge(
-            charge_id,
-            proof_id=proof_id,
-            actor_user_id=actor_user_id,
-        )
+        return {"updatedCount": 0}
 
     def get_health(self) -> dict[str, Any]:
         return {
@@ -509,10 +503,6 @@ class LegacyJsonRuntime:
             "users": len(self.state["users"]),
             "fileObjects": len(self.state["fileObjects"]),
             "auditLogs": len(self.state["auditLogs"]),
-            "stockItems": len(self.state["stockItems"]),
-            "dispatchRequests": len(self.state["dispatchRequests"]),
-            "dispatchItems": len(self.state["dispatchItems"]),
-            "domesticShipments": len(self.state["domesticShipments"]),
         }
 
     def sync_registered_user(self, user: dict[str, Any]) -> None:
@@ -569,75 +559,6 @@ class LegacyJsonRuntime:
 
     def list_audit_logs(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
         return self.audit_service.list_logs(user, filters)
-
-    def stock_in_records(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.stock_in_records(payload, actor_user_id=user["id"])
-        self.persist()
-        return result
-
-    def list_dispatchable_items(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
-        return self.warehouse_dispatch_module.list_dispatchable_items(filters, actor_user_id=user["id"])
-
-    def create_dispatch_request(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.create_dispatch_request(payload, actor_user_id=user["id"])
-        self.persist()
-        return result
-
-    def mark_dispatch_packed(
-        self,
-        user: dict[str, Any],
-        dispatch_request_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.mark_dispatch_packed(
-            dispatch_request_id,
-            payload,
-            actor_user_id=user["id"],
-        )
-        self.persist()
-        return result
-
-    def record_domestic_fee(
-        self,
-        user: dict[str, Any],
-        dispatch_request_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.record_domestic_fee(
-            dispatch_request_id,
-            payload,
-            actor_user_id=user["id"],
-        )
-        self.persist()
-        return result
-
-    def record_domestic_shipment(
-        self,
-        user: dict[str, Any],
-        dispatch_request_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.record_domestic_shipment(
-            dispatch_request_id,
-            payload,
-            actor_user_id=user["id"],
-        )
-        self.persist()
-        return result
-
-    def complete_dispatch_request(
-        self,
-        user: dict[str, Any],
-        dispatch_request_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.complete_dispatch_request(
-            dispatch_request_id,
-            payload,
-            actor_user_id=user["id"],
-        )
-        self.persist()
-        return result
 
     def build_bootstrap(self, user: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -906,7 +827,7 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
         needs_persist = True
     if remove_transfer_exception_state(state):
         needs_persist = True
-    if ensure_warehouse_dispatch_state(state):
+    if remove_warehouse_dispatch_state(state):
         needs_persist = True
 
     store = LegacyJsonRuntime(config, state, created_fresh_data)

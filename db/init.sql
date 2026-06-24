@@ -424,6 +424,27 @@ CREATE TABLE IF NOT EXISTS dispatch_requests (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS shipping_fee_cny INTEGER;
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS fee_mode TEXT;
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS payment_channel_id TEXT REFERENCES payment_channels(id);
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS domestic_charge_id TEXT REFERENCES charges(id);
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS domestic_fee_recorded_at TIMESTAMPTZ;
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS domestic_fee_confirmed_at TIMESTAMPTZ;
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS domestic_fee_confirmed_proof_id TEXT REFERENCES payment_proofs(id);
+
 CREATE TABLE IF NOT EXISTS dispatch_items (
   id TEXT PRIMARY KEY,
   dispatch_request_id TEXT NOT NULL REFERENCES dispatch_requests(id) ON DELETE CASCADE,
@@ -447,6 +468,9 @@ CREATE TABLE IF NOT EXISTS domestic_shipments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE dispatch_requests
+  ADD COLUMN IF NOT EXISTS domestic_shipment_id TEXT REFERENCES domestic_shipments(id);
 
 CREATE TABLE IF NOT EXISTS transfers (
   id TEXT PRIMARY KEY,

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import secrets
-from datetime import datetime
 from typing import Any
 
 from .auth import AuthModule, ensure_identity_seed
 from .charge_payment import ChargePaymentModule, ChargePaymentRepository
 from .config import Config
 from .db_access import connect
-from .db_access import to_iso
 from .errors import AppError
 from .file_audit import DatabaseAuditService, DatabaseFileService
 from .group_buy_management import GroupBuyModule, GroupBuyRepository
@@ -17,6 +14,7 @@ from .goods_catalog import GoodsCatalogModule, GoodsCatalogRepository
 from .order_logistics import OrderLogisticsModule, OrderLogisticsRepository
 from .store import Store, create_store, has_permission
 from .transfer_exception import TransferExceptionModule
+from .warehouse_dispatch import WarehouseDispatchModule, WarehouseDispatchRepository
 
 
 class AppContext:
@@ -52,31 +50,11 @@ class AppContext:
         self.charge_payment_module = self._build_charge_payment_module()
         self.group_buy_records_module = self._build_group_buy_records_module()
         self.group_buy_management_module = self._build_group_buy_management_module()
+        self.warehouse_dispatch_module = self._build_warehouse_dispatch_module()
         self.order_logistics_module = self._build_order_logistics_module()
         self.transfer_exception_module = self._build_transfer_exception_module()
-        self.warehouse_dispatch_module = getattr(self.runtime, "warehouse_dispatch_module", None)
         self._wire_group_buy_record_dependencies()
         self._wire_charge_payment_dependencies()
-
-    def _dict_row(self):
-        from psycopg.rows import dict_row
-
-        return dict_row
-
-    def _build_stock_item_snapshot(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
-        # 将 stock_items 行转成可写审计 JSON 的快照。
-        if row is None:
-            return None
-        return {
-            "id": row["id"],
-            "warehouseUserId": row["warehouse_user_id"],
-            "groupBuyRecordId": row["group_buy_record_id"],
-            "quantity": row["quantity"],
-            "status": row["status"],
-            "stockedAt": to_iso(row.get("stocked_at")),
-            "createdAt": to_iso(row.get("created_at")),
-            "updatedAt": to_iso(row.get("updated_at")),
-        }
 
     def _build_charge_payment_module(self) -> ChargePaymentModule | None:
         if not self.config.database_url:
@@ -120,6 +98,31 @@ class AppContext:
             has_permission=self.has_permission_by_user_id,
             audit_service=self.audit_service,
             create_charge_from_related_module=(
+                self.charge_payment_module.create_charge_from_related_module_in_connection
+                if self.charge_payment_module is not None
+                else None
+            ),
+        )
+
+    def _build_warehouse_dispatch_module(self) -> WarehouseDispatchModule | None:
+        if not self.config.database_url or self.group_buy_records_module is None:
+            return None
+        return WarehouseDispatchModule(
+            self.config,
+            repository=WarehouseDispatchRepository(self.config),
+            audit_service=self.audit_service,
+            has_permission_by_user_id=self.has_permission_by_user_id,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            require_group_buy_record=self.group_buy_records_module.require_record,
+            build_group_buy_record_summary=self.group_buy_records_module.build_record_summary,
+            mark_stocked_in_connection=self.group_buy_records_module.mark_stocked_in_connection,
+            mark_dispatch_requested_in_connection=(
+                self.group_buy_records_module.mark_dispatch_requested_in_connection
+            ),
+            mark_dispatched_in_connection=self.group_buy_records_module.mark_dispatched_in_connection,
+            mark_completed_in_connection=self.group_buy_records_module.mark_completed_in_connection,
+            link_charge_in_connection=self.group_buy_records_module.link_charge_in_connection,
+            create_charge=(
                 self.charge_payment_module.create_charge_from_related_module_in_connection
                 if self.charge_payment_module is not None
                 else None
@@ -177,7 +180,11 @@ class AppContext:
                 if self.charge_payment_module is not None
                 else None
             ),
-            stock_in_batch=self._stock_in_international_batch_db,
+            stock_in_batch=(
+                self.warehouse_dispatch_module.stock_in_international_batch
+                if self.warehouse_dispatch_module is not None
+                else None
+            ),
         )
 
     def _build_transfer_exception_module(self) -> TransferExceptionModule | None:
@@ -211,7 +218,7 @@ class AppContext:
             )
         if self.warehouse_dispatch_module is not None:
             self.warehouse_dispatch_module.create_charge = (
-                self.charge_payment_module.create_charge_from_related_module
+                self.charge_payment_module.create_charge_from_related_module_in_connection
             )
         if self.transfer_exception_module is not None:
             self.transfer_exception_module.record_exceptions.create_charge_adjustment = (
@@ -242,18 +249,6 @@ class AppContext:
             self.order_logistics_module.link_charge_in_connection = (
                 self.group_buy_records_module.link_charge_in_connection
             )
-        if self.warehouse_dispatch_module is not None:
-            self.warehouse_dispatch_module.require_group_buy_record = self.group_buy_records_module.require_record
-            self.warehouse_dispatch_module.build_group_buy_record_summary = (
-                self.group_buy_records_module.build_record_summary
-            )
-            self.warehouse_dispatch_module.mark_stocked = self.group_buy_records_module.mark_stocked
-            self.warehouse_dispatch_module.mark_dispatch_requested = (
-                self.group_buy_records_module.mark_dispatch_requested
-            )
-            self.warehouse_dispatch_module.mark_dispatched = self.group_buy_records_module.mark_dispatched
-            self.warehouse_dispatch_module.mark_completed = self.group_buy_records_module.mark_completed
-            self.warehouse_dispatch_module.link_charge = self.group_buy_records_module.link_charge
         if self.transfer_exception_module is not None:
             self.transfer_exception_module.transfer_requests.group_buy_records = self.group_buy_records_module
             self.transfer_exception_module.record_exceptions.group_buy_records = self.group_buy_records_module
@@ -293,47 +288,28 @@ class AppContext:
             return False
         return "admin" in user.get("roles", []) or user.get("groupId") == group_id
 
-    def _normalize_required_text(self, value: Any, field_name: str, min_length: int = 1) -> str:
-        # AppContext 层少量 DB 编排使用的文本校验。
-        normalized = value.strip() if isinstance(value, str) else ""
-        if len(normalized) < min_length:
-            raise AppError(400, f"{field_name}填写不完整", "VALIDATION_FAILED")
-        return normalized
-
-    def _normalize_optional_text(self, value: Any, field_name: str) -> str | None:
-        # AppContext 层少量 DB 编排使用的可选文本校验。
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise AppError(400, f"{field_name}格式不正确", "VALIDATION_FAILED")
-        normalized = value.strip()
-        return normalized or None
-
-    def _normalize_positive_int(self, value: Any, field_name: str) -> int:
-        # AppContext 层少量 DB 编排使用的正整数校验。
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise AppError(400, f"{field_name}格式不正确", "VALIDATION_FAILED")
-        if value <= 0:
-            raise AppError(400, f"{field_name}必须大于 0", "VALIDATION_FAILED")
-        return value
-
     def on_charge_confirmed(
         self,
         charge_id: str,
         *,
         proof_id: str | None,
         actor_user_id: str | None,
+        conn=None,
     ) -> dict[str, Any]:
         if self.warehouse_dispatch_module is None:
             return {"updatedCount": 0}
-        result = self.warehouse_dispatch_module.confirm_charge(
+        if conn is not None:
+            return self.warehouse_dispatch_module.confirm_charge_in_connection(
+                conn,
+                charge_id,
+                proof_id=proof_id,
+                actor_user_id=actor_user_id,
+            )
+        return self.warehouse_dispatch_module.confirm_charge(
             charge_id,
             proof_id=proof_id,
             actor_user_id=actor_user_id,
         )
-        if result.get("updatedCount"):
-            self.runtime.persist()
-        return result
 
     def assert_goods_permission(self, user: dict[str, Any], permission: str) -> None:
         if not has_permission(user, permission):
@@ -345,17 +321,6 @@ class AppContext:
             raise AppError(404, "用户不存在", "NOT_FOUND")
         if not has_permission(user, "group_buy:update_any"):
             raise AppError(403, "当前账号没有下单转运维护权限", "FORBIDDEN")
-
-    def _assert_can_manage_warehouse(self, actor_user_id: str, warehouse_user_id: str) -> None:
-        user = self.get_user_snapshot_by_id(actor_user_id)
-        if user is None:
-            raise AppError(404, "用户不存在", "NOT_FOUND")
-        if "admin" in user.get("roles", []):
-            return
-        if not self.has_permission_by_user_id(actor_user_id, "dispatch:process_assigned"):
-            raise AppError(403, "当前账号没有处理囤货排发的权限", "FORBIDDEN")
-        if actor_user_id != warehouse_user_id:
-            raise AppError(403, "当前账号只能处理分配给自己的囤货点", "FORBIDDEN")
 
     def health(self) -> dict[str, Any]:
         health = self.auth.get_health() if self.auth.is_enabled() else self.runtime.get_health()
@@ -542,166 +507,83 @@ class AppContext:
             raise RuntimeError("Order logistics database module requires DATABASE_URL.")
         return self.order_logistics_module
 
-    def _stock_in_international_batch_db(
-        self,
-        batch_id: str,
-        payload: dict[str, Any],
-        *,
-        actor_user_id: str,
-    ) -> dict[str, Any]:
-        # 国际批次入库的 DB 适配层：只写 stock_items 事实，不接管排发主体流程。
-        batch = self._require_order_logistics_module().require_international_batch(batch_id)
-        if batch["status"] == "stocked":
-            raise AppError(400, "国际批次已经完成入库", "DUPLICATED_OPERATION")
-        if batch["status"] != "arrived_domestic":
-            raise AppError(400, "只有已到国内的批次才能入库", "INVALID_STATUS")
+    def _require_warehouse_dispatch_module(self) -> WarehouseDispatchModule:
+        if self.warehouse_dispatch_module is None:
+            raise RuntimeError("Warehouse dispatch database module requires DATABASE_URL.")
+        return self.warehouse_dispatch_module
 
-        warehouse_user_id = self._normalize_required_text(batch.get("warehouseUserId"), "warehouseUserId")
-        stocked_at = self._normalize_required_text(
-            payload.get("stockedAt") if "stockedAt" in payload else payload.get("stocked_at"),
-            "stockedAt",
+    def stock_in_records(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 囤货入库入口，交给 DB 版仓库排发模块处理。
+        return self._require_warehouse_dispatch_module().stock_in_records(
+            payload,
+            actor_user_id=user["id"],
         )
-        try:
-            stocked_at = datetime.fromisoformat(stocked_at.replace("Z", "+00:00")).isoformat()
-        except ValueError as exc:
-            raise AppError(400, "stockedAt不是合法时间", "VALIDATION_FAILED") from exc
-        note = self._normalize_optional_text(payload.get("note"), "note")
-        self._assert_can_manage_warehouse(actor_user_id, warehouse_user_id)
 
-        record_ids = self._require_order_logistics_module().list_batch_record_ids(batch_id)
-        if not record_ids:
-            raise AppError(400, "空批次不能入库", "VALIDATION_FAILED")
+    def list_dispatchable_items(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
+        # 查询可排发库存入口，数据从 stock_items 和 group_buy_records 推导。
+        return self._require_warehouse_dispatch_module().list_dispatchable_items(
+            filters,
+            actor_user_id=user["id"],
+        )
 
-        stock_item_ids: list[str] = []
-        with connect(self.config) as conn:
-            before_batch = self._require_order_logistics_module()._require_international_batch_in_connection(
-                conn,
-                batch_id,
-                lock=True,
-            )
-            if before_batch["status"] == "stocked":
-                raise AppError(400, "国际批次已经完成入库", "DUPLICATED_OPERATION")
-            if before_batch["status"] != "arrived_domestic":
-                raise AppError(400, "只有已到国内的批次才能入库", "INVALID_STATUS")
+    def create_dispatch_request(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 创建排发申请入口，写 dispatch_requests 和 dispatch_items。
+        return self._require_warehouse_dispatch_module().create_dispatch_request(
+            payload,
+            actor_user_id=user["id"],
+        )
 
-            for record_id in record_ids:
-                record = self._require_group_buy_records_module()._require_record_in_connection(
-                    conn,
-                    record_id,
-                    lock=True,
-                )
-                with conn.cursor(row_factory=self._dict_row()) as cur:
-                    cur.execute(
-                        """
-                        SELECT *
-                        FROM stock_items
-                        WHERE group_buy_record_id = %s
-                        LIMIT 1
-                        FOR UPDATE
-                        """,
-                        (record_id,),
-                    )
-                    before_stock_item = cur.fetchone()
-                    if before_stock_item is None:
-                        stock_item_id = f"stock_item_{secrets.token_hex(8)}"
-                        cur.execute(
-                            """
-                            INSERT INTO stock_items (
-                              id, warehouse_user_id, group_buy_record_id,
-                              quantity, status, stocked_at
-                            )
-                            VALUES (%s, %s, %s, %s, 'in_stock', %s)
-                            RETURNING id
-                            """,
-                            (
-                                stock_item_id,
-                                warehouse_user_id,
-                                record_id,
-                                record["quantity"],
-                                stocked_at,
-                            ),
-                        )
-                    else:
-                        if before_stock_item["status"] in {"reserved", "shipped", "completed"}:
-                            raise AppError(400, "已有排发流程的库存不能重复入库", "DUPLICATED_OPERATION")
-                        stock_item_id = before_stock_item["id"]
-                        cur.execute(
-                            """
-                            UPDATE stock_items
-                            SET warehouse_user_id = %s,
-                                quantity = %s,
-                                status = 'in_stock',
-                                stocked_at = %s,
-                                updated_at = NOW()
-                            WHERE id = %s
-                            RETURNING id
-                            """,
-                            (
-                                warehouse_user_id,
-                                record["quantity"],
-                                stocked_at,
-                                stock_item_id,
-                            ),
-                        )
-                    stock_item_ids.append(cur.fetchone()["id"])
+    def mark_dispatch_packed(
+        self,
+        user: dict[str, Any],
+        dispatch_request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 标记排发申请已打包入口。
+        return self._require_warehouse_dispatch_module().mark_dispatch_packed(
+            dispatch_request_id,
+            payload,
+            actor_user_id=user["id"],
+        )
 
-                self.audit_service.log_in_connection(
-                    conn,
-                    actor_user_id=actor_user_id,
-                    action="stock_item.stock_in",
-                    object_type="stock_item",
-                    object_id=stock_item_ids[-1],
-                    before=self._build_stock_item_snapshot(before_stock_item),
-                    after={
-                        "id": stock_item_ids[-1],
-                        "warehouseUserId": warehouse_user_id,
-                        "groupBuyRecordId": record_id,
-                        "quantity": record["quantity"],
-                        "status": "in_stock",
-                        "stockedAt": stocked_at,
-                    },
-                    reason=note or "国际批次转国内入库",
-                )
+    def record_domestic_fee(
+        self,
+        user: dict[str, Any],
+        dispatch_request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 录入国内运费入口。
+        return self._require_warehouse_dispatch_module().record_domestic_fee(
+            dispatch_request_id,
+            payload,
+            actor_user_id=user["id"],
+        )
 
-            self._require_group_buy_records_module().mark_stocked_in_connection(
-                conn,
-                record_ids,
-                actor_user_id=actor_user_id,
-                reason=note or "国际批次转国内入库",
-            )
-            with conn.cursor(row_factory=self._dict_row()) as cur:
-                cur.execute(
-                    """
-                    UPDATE international_batches
-                    SET status = 'stocked',
-                        stocked_at = %s,
-                        note = COALESCE(%s, note),
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (stocked_at, note, batch_id),
-                )
-            after_batch = self._require_order_logistics_module()._require_international_batch_in_connection(
-                conn,
-                batch_id,
-            )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=actor_user_id,
-                action="international_batch.stock_in",
-                object_type="international_batch",
-                object_id=batch_id,
-                before=before_batch,
-                after={
-                    **after_batch,
-                    "groupBuyRecordIds": record_ids,
-                    "stockItemIds": stock_item_ids,
-                },
-                reason=note or "国际批次转国内入库",
-            )
-            conn.commit()
+    def record_domestic_shipment(
+        self,
+        user: dict[str, Any],
+        dispatch_request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 录入国内快递入口。
+        return self._require_warehouse_dispatch_module().record_domestic_shipment(
+            dispatch_request_id,
+            payload,
+            actor_user_id=user["id"],
+        )
 
-        return {"batchId": batch_id, "status": "stocked", "stockItemIds": stock_item_ids}
+    def complete_dispatch_request(
+        self,
+        user: dict[str, Any],
+        dispatch_request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 完成排发申请入口。
+        return self._require_warehouse_dispatch_module().complete_dispatch_request(
+            dispatch_request_id,
+            payload,
+            actor_user_id=user["id"],
+        )
 
     def add_order_screenshot(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         # 下单截图写入 DB 表 order_screenshots。
@@ -760,11 +642,11 @@ class AppContext:
         batch_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # 入库入口转交订单物流模块，再由其调用仓库排发 DB 依赖。
-        return self._require_order_logistics_module().stock_in_batch_records(
-            user["id"],
+        # 国际批次入库入口，逻辑迁回仓库排发模块。
+        return self._require_warehouse_dispatch_module().stock_in_international_batch(
             batch_id,
             payload,
+            actor_user_id=user["id"],
         )
 
     def record_international_batch_fees(
@@ -781,7 +663,7 @@ class AppContext:
         )
 
     def get_group_buy_for_write(self, actor_user_id: str, group_buy_id: str) -> dict[str, Any]:
-        # 迁移期供下单转运模块校验团购存在性，仍然只读 DB 团购表。
+        # 供下单转运模块校验团购存在性，仍然只读 DB 团购表。
         module = self._require_group_buy_management_module()
         module._assert_permission(
             actor_user_id,
@@ -885,7 +767,7 @@ class AppContext:
         return self._require_charge_payment_module().create_charge_adjustment(user["id"], payload)
 
     def request_transfer(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        # 转单申请由 transfer_exception 模块内的 DB workflow 处理。
+        # 杞崟鐢宠鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().request_transfer(user, payload)
 
     def approve_transfer(
@@ -894,7 +776,7 @@ class AppContext:
         transfer_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # 转单通过由 transfer_exception 模块内的 DB workflow 处理。
+        # 杞崟閫氳繃鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().approve_transfer(user["id"], transfer_id, payload)
 
     def reject_transfer(
@@ -903,7 +785,7 @@ class AppContext:
         transfer_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # 转单驳回由 transfer_exception 模块内的 DB workflow 处理。
+        # 杞崟椹冲洖鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().reject_transfer(user["id"], transfer_id, payload)
 
     def mark_record_exception(
@@ -912,7 +794,7 @@ class AppContext:
         group_buy_record_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # 异常标记由 transfer_exception 模块内的 DB workflow 处理。
+        # 寮傚父鏍囪鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().mark_record_exception(user["id"], group_buy_record_id, payload)
 
     def resolve_record_exception(
@@ -921,7 +803,7 @@ class AppContext:
         group_buy_record_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # 异常解决由 transfer_exception 模块内的 DB workflow 处理。
+        # 寮傚父瑙ｅ喅鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().resolve_record_exception(user["id"], group_buy_record_id, payload)
 
     def create_goods(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
