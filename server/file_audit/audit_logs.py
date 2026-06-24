@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ..config import Config
+from ..db_access import connect, to_iso
 from ..errors import AppError
 
 
@@ -96,7 +100,41 @@ def trim_snapshot(value: Any, depth: int = 0) -> Any:
     return clone(value)
 
 
+def _audit_actor_to_db(actor_user_id: str | None) -> str | None:
+    return None if actor_user_id in {None, "system"} else actor_user_id
+
+
+def _audit_actor_from_db(actor_user_id: str | None) -> str:
+    return actor_user_id or "system"
+
+
+def _json_from_db(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _build_audit_log(row: dict[str, Any], actor_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "actorUserId": _audit_actor_from_db(row.get("actor_user_id")),
+        "action": row["action"],
+        "objectType": row["object_type"],
+        "objectId": row["object_id"],
+        "before": _json_from_db(row.get("before_json")),
+        "after": _json_from_db(row.get("after_json")),
+        "reason": row.get("reason"),
+        "createdAt": to_iso(row.get("created_at")),
+        "actorUser": actor_user,
+    }
+
+
 class AuditService:
+    """Legacy JSON audit service kept for the migration period."""
+
     def __init__(
         self,
         *,
@@ -195,6 +233,200 @@ class AuditService:
         end = start + page_size
         return {
             "items": items[start:end],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+
+
+class DatabaseAuditService:
+    def __init__(
+        self,
+        *,
+        config: Config,
+        can_list_logs: Callable[[dict[str, Any]], bool],
+        get_user_snapshot_by_id: Callable[[str], dict[str, Any] | None],
+    ):
+        self.config = config
+        self.can_list_logs = can_list_logs
+        self.get_user_snapshot_by_id = get_user_snapshot_by_id
+
+    def _dict_row(self):
+        try:
+            from psycopg.rows import dict_row
+        except ModuleNotFoundError:
+            return None
+
+        return dict_row
+
+    def log_in_connection(
+        self,
+        conn,
+        *,
+        actor_user_id: str | None,
+        action: str,
+        object_type: str,
+        object_id: str,
+        before: Any,
+        after: Any,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        before_json = trim_snapshot(before) if before is not None else None
+        after_json = trim_snapshot(after) if after is not None else None
+
+        with conn.cursor(row_factory=self._dict_row()) as cur:
+            cur.execute(
+                """
+                INSERT INTO audit_logs (
+                  id,
+                  actor_user_id,
+                  action,
+                  object_type,
+                  object_id,
+                  before_json,
+                  after_json,
+                  reason,
+                  created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, NOW())
+                RETURNING *
+                """,
+                (
+                    f"audit_{secrets.token_hex(8)}",
+                    _audit_actor_to_db(actor_user_id),
+                    normalize_required_text(action, "操作类型"),
+                    normalize_required_text(object_type, "对象类型"),
+                    normalize_required_text(object_id, "对象 ID"),
+                    None if before_json is None else json.dumps(before_json, ensure_ascii=False),
+                    None if after_json is None else json.dumps(after_json, ensure_ascii=False),
+                    normalize_optional_text(reason),
+                ),
+            )
+            row = cur.fetchone()
+
+        actor_user_id_from_db = row.get("actor_user_id")
+        actor_user = (
+            self.get_user_snapshot_by_id(actor_user_id_from_db)
+            if actor_user_id_from_db
+            else None
+        )
+        return _build_audit_log(row, actor_user=actor_user)
+
+    def log(
+        self,
+        *,
+        actor_user_id: str | None,
+        action: str,
+        object_type: str,
+        object_id: str,
+        before: Any,
+        after: Any,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        with connect(self.config) as conn:
+            record = self.log_in_connection(
+                conn,
+                actor_user_id=actor_user_id,
+                action=action,
+                object_type=object_type,
+                object_id=object_id,
+                before=before,
+                after=after,
+                reason=reason,
+            )
+            conn.commit()
+        return record
+
+    def list_logs(self, viewer: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
+        if not self.can_list_logs(viewer):
+            raise AppError(403, "当前账号没有查看审计日志的权限", "FORBIDDEN")
+
+        object_type = normalize_optional_text(filters.get("objectType"))
+        object_id = normalize_optional_text(filters.get("objectId"))
+        actor_user_id = normalize_optional_text(filters.get("actorUserId"))
+        action = normalize_optional_text(filters.get("action"))
+        created_from = parse_iso_datetime(
+            normalize_optional_text(filters.get("createdFrom")),
+            "createdFrom",
+        )
+        created_to = parse_iso_datetime(
+            normalize_optional_text(filters.get("createdTo")),
+            "createdTo",
+        )
+        page = normalize_page_number(filters.get("page"), "page", 1)
+        page_size = normalize_page_number(
+            filters.get("pageSize"),
+            "pageSize",
+            DEFAULT_AUDIT_PAGE_SIZE,
+        )
+        if page_size > MAX_AUDIT_PAGE_SIZE:
+            raise AppError(400, f"pageSize 不能超过 {MAX_AUDIT_PAGE_SIZE}", "VALIDATION_FAILED")
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if object_type:
+            conditions.append("object_type = %s")
+            params.append(object_type)
+        if object_id:
+            conditions.append("object_id = %s")
+            params.append(object_id)
+        if actor_user_id:
+            if actor_user_id == "system":
+                conditions.append("actor_user_id IS NULL")
+            else:
+                conditions.append("actor_user_id = %s")
+                params.append(actor_user_id)
+        if action:
+            conditions.append("action = %s")
+            params.append(action)
+        if created_from:
+            conditions.append("created_at >= %s")
+            params.append(created_from)
+        if created_to:
+            conditions.append("created_at <= %s")
+            params.append(created_to)
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        offset = (page - 1) * page_size
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS total
+                    FROM audit_logs
+                    {where_sql}
+                    """,
+                    params,
+                )
+                total = cur.fetchone()["total"]
+
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM audit_logs
+                    {where_sql}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    [*params, page_size, offset],
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = []
+        for row in rows:
+            actor_user_id_from_db = row.get("actor_user_id")
+            actor_user = (
+                self.get_user_snapshot_by_id(actor_user_id_from_db)
+                if actor_user_id_from_db
+                else None
+            )
+            items.append(_build_audit_log(row, actor_user=actor_user))
+
+        return {
+            "items": items,
             "total": total,
             "page": page,
             "pageSize": page_size,

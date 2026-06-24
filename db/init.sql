@@ -83,9 +83,17 @@ CREATE TABLE IF NOT EXISTS file_objects (
   content_type TEXT,
   size_bytes BIGINT,
   uploaded_by TEXT REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (bucket, object_key)
 );
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS goods (
   id TEXT PRIMARY KEY,
