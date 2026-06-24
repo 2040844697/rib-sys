@@ -457,9 +457,25 @@ CREATE TABLE IF NOT EXISTS transfers (
   requested_by TEXT NOT NULL REFERENCES users(id),
   approved_by TEXT REFERENCES users(id),
   approved_at TIMESTAMPTZ,
+  rejected_by TEXT REFERENCES users(id),
+  rejected_at TIMESTAMPTZ,
+  reject_reason TEXT,
+  note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE transfers
+  ADD COLUMN IF NOT EXISTS rejected_by TEXT REFERENCES users(id);
+
+ALTER TABLE transfers
+  ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+
+ALTER TABLE transfers
+  ADD COLUMN IF NOT EXISTS reject_reason TEXT;
+
+ALTER TABLE transfers
+  ADD COLUMN IF NOT EXISTS note TEXT;
 
 CREATE TABLE IF NOT EXISTS transfer_items (
   id TEXT PRIMARY KEY,

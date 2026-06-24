@@ -16,6 +16,7 @@ from .group_buy_records import GroupBuyRecordRepository, GroupBuyRecordsModule
 from .goods_catalog import GoodsCatalogModule, GoodsCatalogRepository
 from .order_logistics import OrderLogisticsModule, OrderLogisticsRepository
 from .store import Store, create_store, has_permission
+from .transfer_exception import TransferExceptionModule
 
 
 class AppContext:
@@ -52,7 +53,7 @@ class AppContext:
         self.group_buy_records_module = self._build_group_buy_records_module()
         self.group_buy_management_module = self._build_group_buy_management_module()
         self.order_logistics_module = self._build_order_logistics_module()
-        self.transfer_exception_module = getattr(self.runtime, "transfer_exception_module", None)
+        self.transfer_exception_module = self._build_transfer_exception_module()
         self.warehouse_dispatch_module = getattr(self.runtime, "warehouse_dispatch_module", None)
         self._wire_group_buy_record_dependencies()
         self._wire_charge_payment_dependencies()
@@ -179,6 +180,23 @@ class AppContext:
             stock_in_batch=self._stock_in_international_batch_db,
         )
 
+    def _build_transfer_exception_module(self) -> TransferExceptionModule | None:
+        if not self.config.database_url:
+            return None
+        return TransferExceptionModule(
+            self.config,
+            audit_service=self.audit_service,
+            group_buy_records=self.group_buy_records_module,
+            create_charge_adjustment=(
+                self.charge_payment_module.create_charge_adjustment_in_connection
+                if self.charge_payment_module is not None
+                else None
+            ),
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            has_permission_by_user_id=self.has_permission_by_user_id,
+            has_group_access_by_user_id=self.has_group_access_by_user_id,
+        )
+
     def _wire_charge_payment_dependencies(self) -> None:
         if self.charge_payment_module is None:
             return
@@ -195,12 +213,9 @@ class AppContext:
             self.warehouse_dispatch_module.create_charge = (
                 self.charge_payment_module.create_charge_from_related_module
             )
-        if (
-            self.transfer_exception_module is not None
-            and hasattr(self.transfer_exception_module, "record_exceptions")
-        ):
+        if self.transfer_exception_module is not None:
             self.transfer_exception_module.record_exceptions.create_charge_adjustment = (
-                self.charge_payment_module.create_charge_adjustment
+                self.charge_payment_module.create_charge_adjustment_in_connection
             )
         if (
             self.group_buy_management_module is not None
@@ -240,16 +255,8 @@ class AppContext:
             self.warehouse_dispatch_module.mark_completed = self.group_buy_records_module.mark_completed
             self.warehouse_dispatch_module.link_charge = self.group_buy_records_module.link_charge
         if self.transfer_exception_module is not None:
-            record_links = self.transfer_exception_module.transfer_requests.record_links
-            record_links.require_group_buy_record = self.group_buy_records_module.require_record
-            record_links.refresh_record_status = self.group_buy_records_module.refresh_record_status
-            record_links.create_record_for_transfer = self.group_buy_records_module.create_transfer_record
-            self.transfer_exception_module.record_exceptions.require_group_buy_record = (
-                self.group_buy_records_module.require_record
-            )
-            self.transfer_exception_module.record_exceptions.refresh_record_status = (
-                self.group_buy_records_module.refresh_record_status
-            )
+            self.transfer_exception_module.transfer_requests.group_buy_records = self.group_buy_records_module
+            self.transfer_exception_module.record_exceptions.group_buy_records = self.group_buy_records_module
 
     @property
     def startup_info(self) -> dict[str, Any]:
@@ -510,6 +517,11 @@ class AppContext:
         if self.group_buy_records_module is None:
             raise RuntimeError("Group buy records database module requires DATABASE_URL.")
         return self.group_buy_records_module
+
+    def _require_transfer_exception_module(self) -> TransferExceptionModule:
+        if self.transfer_exception_module is None:
+            raise RuntimeError("Transfer exception database module requires DATABASE_URL.")
+        return self.transfer_exception_module
 
     def release_group_buy_item_stock(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         # 释放已认领库存，供维护动作显式调用。
@@ -873,10 +885,8 @@ class AppContext:
         return self._require_charge_payment_module().create_charge_adjustment(user["id"], payload)
 
     def request_transfer(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        # DB 版转单申请：创建 transfers/transfer_items，并把源记录标记为转单中。
-        if self.config.database_url:
-            return self._request_transfer_db(user, payload)
-        return self.runtime.request_transfer(user, payload)
+        # 转单申请由 transfer_exception 模块内的 DB workflow 处理。
+        return self._require_transfer_exception_module().request_transfer(user, payload)
 
     def approve_transfer(
         self,
@@ -884,10 +894,8 @@ class AppContext:
         transfer_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # DB 版转单通过：创建受让记录、扣减源记录数量并更新 transfer 状态。
-        if self.config.database_url:
-            return self._approve_transfer_db(user["id"], transfer_id, payload)
-        return self.runtime.approve_transfer(user, transfer_id, payload)
+        # 转单通过由 transfer_exception 模块内的 DB workflow 处理。
+        return self._require_transfer_exception_module().approve_transfer(user["id"], transfer_id, payload)
 
     def reject_transfer(
         self,
@@ -895,10 +903,8 @@ class AppContext:
         transfer_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # DB 版转单驳回：释放源记录 transfer_id 并更新 transfer 状态。
-        if self.config.database_url:
-            return self._reject_transfer_db(user["id"], transfer_id, payload)
-        return self.runtime.reject_transfer(user, transfer_id, payload)
+        # 转单驳回由 transfer_exception 模块内的 DB workflow 处理。
+        return self._require_transfer_exception_module().reject_transfer(user["id"], transfer_id, payload)
 
     def mark_record_exception(
         self,
@@ -906,23 +912,8 @@ class AppContext:
         group_buy_record_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # DB 版异常标记直接写 group_buy_records 的异常字段。
-        if self.config.database_url:
-            if not self.has_permission_by_user_id(user["id"], "record:mark_exception"):
-                raise AppError(403, "当前账号没有处理异常记录的权限", "FORBIDDEN")
-            exception_reason = self._normalize_required_text(
-                payload.get("exceptionReason") if "exceptionReason" in payload else payload.get("exception_reason"),
-                "exceptionReason",
-                2,
-            )
-            note = self._normalize_optional_text(payload.get("note"), "note")
-            return self._require_group_buy_records_module().mark_exception(
-                group_buy_record_id,
-                actor_user_id=user["id"],
-                exception_reason=exception_reason,
-                note=note,
-            )
-        return self.runtime.mark_record_exception(user, group_buy_record_id, payload)
+        # 异常标记由 transfer_exception 模块内的 DB workflow 处理。
+        return self._require_transfer_exception_module().mark_record_exception(user["id"], group_buy_record_id, payload)
 
     def resolve_record_exception(
         self,
@@ -930,313 +921,8 @@ class AppContext:
         group_buy_record_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        # DB 版异常解决，调价仍由费用模块独立处理。
-        if self.config.database_url:
-            if not self.has_permission_by_user_id(user["id"], "record:mark_exception"):
-                raise AppError(403, "当前账号没有处理异常记录的权限", "FORBIDDEN")
-            resolution = self._normalize_required_text(payload.get("resolution"), "resolution", 2)
-            note = self._normalize_optional_text(payload.get("note"), "note")
-            return self._require_group_buy_records_module().resolve_exception(
-                group_buy_record_id,
-                actor_user_id=user["id"],
-                resolution=resolution,
-                note=note,
-            )
-        return self.runtime.resolve_record_exception(user, group_buy_record_id, payload)
-
-    def _request_transfer_db(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        # 事务内创建转单申请和记录转单中状态。
-        has_from_user_id = "fromUserId" in payload or "from_user_id" in payload
-        from_user_id = self._normalize_required_text(
-            payload.get("fromUserId") if "fromUserId" in payload else payload.get("from_user_id") if has_from_user_id else user["id"],
-            "fromUserId",
-        )
-        to_user_id = self._normalize_required_text(
-            payload.get("toUserId") if "toUserId" in payload else payload.get("to_user_id"),
-            "toUserId",
-        )
-        reason = self._normalize_required_text(payload.get("reason"), "reason", 2)
-        items = self._normalize_transfer_items(payload.get("items"))
-        if user["id"] not in {from_user_id, to_user_id} and not self.has_permission_by_user_id(user["id"], "record:create_for_member"):
-            raise AppError(403, "当前账号没有代成员提交转单申请的权限", "FORBIDDEN")
-        if from_user_id == to_user_id:
-            raise AppError(400, "转入成员不能和转出成员相同", "VALIDATION_FAILED")
-        if self.get_user_snapshot_by_id(from_user_id) is None or self.get_user_snapshot_by_id(to_user_id) is None:
-            raise AppError(404, "转单成员不存在", "NOT_FOUND")
-
-        module = self._require_group_buy_records_module()
-        transfer_id = f"transfer_{secrets.token_hex(8)}"
-        with connect(self.config) as conn:
-            records: list[dict[str, Any]] = []
-            for item in items:
-                record = module._require_record_in_connection(conn, item["groupBuyRecordId"], lock=True)
-                record = module._attach_derived_fields_in_connection(conn, record)
-                self._assert_transferable_record(record, from_user_id=from_user_id, quantity=item["quantity"])
-                group_buy = module._require_group_buy_in_connection(conn, record["groupBuyId"])
-                if not self.has_group_access_by_user_id(to_user_id, group_buy["groupId"]):
-                    raise AppError(400, "转入成员不在当前拼团所属群组中", "VALIDATION_FAILED")
-                records.append(record)
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO transfers (
-                      id, from_user_id, to_user_id, status, reason, requested_by, created_at, updated_at
-                    )
-                    VALUES (%s, %s, %s, 'pending', %s, %s, NOW(), NOW())
-                    """,
-                    (transfer_id, from_user_id, to_user_id, reason, user["id"]),
-                )
-                for item in items:
-                    cur.execute(
-                        """
-                        INSERT INTO transfer_items (
-                          id, transfer_id, group_buy_record_id, quantity, created_at
-                        )
-                        VALUES (%s, %s, %s, %s, NOW())
-                        """,
-                        (
-                            f"transfer_item_{secrets.token_hex(8)}",
-                            transfer_id,
-                            item["groupBuyRecordId"],
-                            item["quantity"],
-                        ),
-                    )
-
-            for item in items:
-                module.mark_transfer_pending_in_connection(
-                    conn,
-                    group_buy_record_id=item["groupBuyRecordId"],
-                    transfer_id=transfer_id,
-                    actor_user_id=user["id"],
-                    reason=reason,
-                )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=user["id"],
-                action="transfer.request",
-                object_type="transfer",
-                object_id=transfer_id,
-                before=None,
-                after={
-                    "id": transfer_id,
-                    "fromUserId": from_user_id,
-                    "toUserId": to_user_id,
-                    "status": "pending",
-                    "items": items,
-                },
-                reason=reason,
-            )
-            conn.commit()
-        return {"transferId": transfer_id, "status": "pending"}
-
-    def _approve_transfer_db(self, actor_user_id: str, transfer_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        # 事务内审核通过转单。
-        if not self.has_permission_by_user_id(actor_user_id, "record:create_for_member"):
-            raise AppError(403, "当前账号没有审核转单的权限", "FORBIDDEN")
-        note = self._normalize_optional_text(payload.get("note"), "note")
-        module = self._require_group_buy_records_module()
-        new_record_ids: list[str] = []
-        with connect(self.config) as conn:
-            transfer, items = self._require_transfer_for_update(conn, transfer_id)
-            if transfer["status"] != "pending":
-                raise AppError(400, "当前转单申请状态不能审核通过", "INVALID_STATUS")
-            for item in items:
-                record = module._require_record_in_connection(conn, item["groupBuyRecordId"], lock=True)
-                record = module._attach_derived_fields_in_connection(conn, record)
-                self._assert_transferable_record(
-                    record,
-                    from_user_id=transfer["fromUserId"],
-                    quantity=item["quantity"],
-                    expected_transfer_id=transfer_id,
-                )
-
-            for item in items:
-                source_record = module._require_record_in_connection(conn, item["groupBuyRecordId"], lock=True)
-                created = module.create_transfer_record_in_connection(
-                    conn,
-                    source_record=source_record,
-                    to_user_id=transfer["toUserId"],
-                    quantity=item["quantity"],
-                    transfer_id=transfer_id,
-                    actor_user_id=actor_user_id,
-                    note=note or transfer["reason"],
-                )
-                new_record_ids.append(created["id"])
-                module.transfer_out_in_connection(
-                    conn,
-                    group_buy_record_id=source_record["id"],
-                    transfer_id=transfer_id,
-                    quantity=item["quantity"],
-                    actor_user_id=actor_user_id,
-                    reason=note or transfer["reason"],
-                )
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE transfers
-                    SET status = 'approved',
-                        approved_by = %s,
-                        approved_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (actor_user_id, transfer_id),
-                )
-            for new_record_id in new_record_ids:
-                module._recalculate_record_status_in_connection(
-                    conn,
-                    new_record_id,
-                    actor_user_id=actor_user_id,
-                    reason=note or transfer["reason"],
-                    write_audit=False,
-                )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=actor_user_id,
-                action="transfer.approve",
-                object_type="transfer",
-                object_id=transfer_id,
-                before=transfer,
-                after={**transfer, "status": "approved", "newGroupBuyRecordIds": new_record_ids},
-                reason=note or transfer["reason"],
-            )
-            conn.commit()
-        return {"transferId": transfer_id, "newGroupBuyRecordIds": new_record_ids}
-
-    def _reject_transfer_db(self, actor_user_id: str, transfer_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        # 事务内驳回转单并释放记录转单中状态。
-        if not self.has_permission_by_user_id(actor_user_id, "record:create_for_member"):
-            raise AppError(403, "当前账号没有审核转单的权限", "FORBIDDEN")
-        reject_reason = self._normalize_required_text(
-            payload.get("rejectReason") if "rejectReason" in payload else payload.get("reject_reason"),
-            "rejectReason",
-            2,
-        )
-        module = self._require_group_buy_records_module()
-        with connect(self.config) as conn:
-            transfer, items = self._require_transfer_for_update(conn, transfer_id)
-            if transfer["status"] != "pending":
-                raise AppError(400, "当前转单申请状态不能驳回", "INVALID_STATUS")
-            for item in items:
-                module.release_transfer_pending_in_connection(
-                    conn,
-                    group_buy_record_id=item["groupBuyRecordId"],
-                    transfer_id=transfer_id,
-                    actor_user_id=actor_user_id,
-                    reason=reject_reason,
-                )
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE transfers
-                    SET status = 'rejected',
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (transfer_id,),
-                )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=actor_user_id,
-                action="transfer.reject",
-                object_type="transfer",
-                object_id=transfer_id,
-                before=transfer,
-                after={**transfer, "status": "rejected"},
-                reason=reject_reason,
-            )
-            conn.commit()
-        return {"transferId": transfer_id, "status": "rejected"}
-
-    def _normalize_transfer_items(self, value: Any) -> list[dict[str, Any]]:
-        # 校验转单条目入参。
-        if not isinstance(value, list) or not value:
-            raise AppError(400, "items格式不正确", "VALIDATION_FAILED")
-        items: list[dict[str, Any]] = []
-        seen_record_ids: set[str] = set()
-        for index, item in enumerate(value):
-            if not isinstance(item, dict):
-                raise AppError(400, f"items[{index}]格式不正确", "VALIDATION_FAILED")
-            record_id = self._normalize_required_text(
-                item.get("groupBuyRecordId") if "groupBuyRecordId" in item else item.get("group_buy_record_id"),
-                f"items[{index}].groupBuyRecordId",
-            )
-            if record_id in seen_record_ids:
-                raise AppError(400, "同一拼单记录不能重复转单", "DUPLICATED_OPERATION")
-            seen_record_ids.add(record_id)
-            items.append(
-                {
-                    "groupBuyRecordId": record_id,
-                    "quantity": self._normalize_positive_int(item.get("quantity"), f"items[{index}].quantity"),
-                }
-            )
-        return items
-
-    def _assert_transferable_record(
-        self,
-        record: dict[str, Any],
-        *,
-        from_user_id: str,
-        quantity: int,
-        expected_transfer_id: str | None = None,
-    ) -> None:
-        # 校验记录是否可进入转单流程。
-        if record["memberUserId"] != from_user_id:
-            raise AppError(400, "转出记录不属于指定成员", "VALIDATION_FAILED")
-        if quantity >= record["quantity"]:
-            raise AppError(400, "现有数据库约束不支持全量转出，请至少保留 1 件在原记录", "VALIDATION_FAILED")
-        if expected_transfer_id is None:
-            if record.get("transferId"):
-                raise AppError(400, "记录已经在转单流程中", "DUPLICATED_OPERATION")
-        elif record.get("transferId") != expected_transfer_id:
-            raise AppError(400, "记录和转单申请不匹配", "INVALID_STATUS")
-        if record.get("isOrdered") or record.get("enteredTransferFlow") or record.get("warehouseUserId"):
-            raise AppError(400, "已进入下单或转运流程的记录暂不支持转单", "INVALID_STATUS")
-        if record.get("dispatchRequestId") or record.get("shipmentId") or record.get("isCompleted"):
-            raise AppError(400, "已进入排发流程的记录暂不支持转单", "INVALID_STATUS")
-
-    def _require_transfer_for_update(self, conn, transfer_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        # 读取并锁定转单申请及其条目。
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, from_user_id, to_user_id, requested_by, status, reason
-                FROM transfers
-                WHERE id = %s
-                LIMIT 1
-                FOR UPDATE
-                """,
-                (transfer_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise AppError(404, "转单申请不存在", "NOT_FOUND")
-            transfer = {
-                "id": row[0],
-                "fromUserId": row[1],
-                "toUserId": row[2],
-                "requestedBy": row[3],
-                "status": row[4],
-                "reason": row[5],
-            }
-            cur.execute(
-                """
-                SELECT group_buy_record_id, quantity
-                FROM transfer_items
-                WHERE transfer_id = %s
-                ORDER BY created_at ASC, id ASC
-                """,
-                (transfer_id,),
-            )
-            items = [
-                {"groupBuyRecordId": item_row[0], "quantity": item_row[1]}
-                for item_row in cur.fetchall()
-            ]
-        if not items:
-            raise AppError(400, "空转单申请不能处理", "VALIDATION_FAILED")
-        return transfer, items
+        # 异常解决由 transfer_exception 模块内的 DB workflow 处理。
+        return self._require_transfer_exception_module().resolve_record_exception(user["id"], group_buy_record_id, payload)
 
     def create_goods(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         self.assert_goods_permission(user, "goods:create")

@@ -11,7 +11,6 @@ from typing import Any
 from .config import Config
 from .errors import AppError
 from .file_audit import AuditService, FileService, ensure_file_audit_state
-from .transfer_exception import TransferExceptionModule, ensure_transfer_exception_state
 from .warehouse_dispatch import WarehouseDispatchModule, ensure_warehouse_dispatch_state
 
 
@@ -304,6 +303,21 @@ def remove_order_logistics_state(state: dict[str, Any]) -> bool:
     return changed
 
 
+def remove_transfer_exception_state(state: dict[str, Any]) -> bool:
+    # 转单和异常已迁移到 DB；这里只清理旧转单 JSON。
+    changed = False
+    for key in ("transfers", "transferItems"):
+        if key in state:
+            state.pop(key, None)
+            changed = True
+    counters = state.setdefault("counters", {})
+    for key in ("transfer", "transferItem"):
+        if key in counters:
+            counters.pop(key, None)
+            changed = True
+    return changed
+
+
 class LegacyJsonRuntime:
     def __init__(self, config: Config, state: dict[str, Any], created_fresh_data: bool):
         self.config = config
@@ -312,7 +326,7 @@ class LegacyJsonRuntime:
         self.sessions: dict[str, dict[str, Any]] = {}
         ensure_file_audit_state(self.state)
         remove_order_logistics_state(self.state)
-        ensure_transfer_exception_state(self.state)
+        remove_transfer_exception_state(self.state)
         ensure_warehouse_dispatch_state(self.state)
         self.audit_service = AuditService(
             state=self.state,
@@ -327,18 +341,6 @@ class LegacyJsonRuntime:
             audit_service=self.audit_service,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
             now_iso=utc_now_iso,
-        )
-        self.transfer_exception_module = TransferExceptionModule(
-            state=self.state,
-            next_id=self.next_id,
-            audit_log=self.audit_service.log,
-            now_iso=utc_now_iso,
-            has_permission_by_user_id=self.has_permission_by_user_id,
-            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            require_group_buy_record=self._database_group_buy_record_dependency_required,
-            refresh_record_status=self._database_group_buy_record_dependency_required,
-            create_record_for_transfer=self._database_group_buy_record_dependency_required,
-            create_charge_adjustment=self._database_charge_dependency_required,
         )
         self.warehouse_dispatch_module = WarehouseDispatchModule(
             state=self.state,
@@ -567,51 +569,6 @@ class LegacyJsonRuntime:
 
     def list_audit_logs(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
         return self.audit_service.list_logs(user, filters)
-
-    def request_transfer(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.transfer_exception_module.request_transfer(user, payload)
-        self.persist()
-        return result
-
-    def approve_transfer(
-        self,
-        user: dict[str, Any],
-        transfer_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.transfer_exception_module.approve_transfer(user["id"], transfer_id, payload)
-        self.persist()
-        return result
-
-    def reject_transfer(
-        self,
-        user: dict[str, Any],
-        transfer_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.transfer_exception_module.reject_transfer(user["id"], transfer_id, payload)
-        self.persist()
-        return result
-
-    def mark_record_exception(
-        self,
-        user: dict[str, Any],
-        group_buy_record_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.transfer_exception_module.mark_record_exception(user["id"], group_buy_record_id, payload)
-        self.persist()
-        return result
-
-    def resolve_record_exception(
-        self,
-        user: dict[str, Any],
-        group_buy_record_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.transfer_exception_module.resolve_record_exception(user["id"], group_buy_record_id, payload)
-        self.persist()
-        return result
 
     def stock_in_records(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         result = self.warehouse_dispatch_module.stock_in_records(payload, actor_user_id=user["id"])
@@ -947,7 +904,7 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
         needs_persist = True
     if remove_order_logistics_state(state):
         needs_persist = True
-    if ensure_transfer_exception_state(state):
+    if remove_transfer_exception_state(state):
         needs_persist = True
     if ensure_warehouse_dispatch_state(state):
         needs_persist = True

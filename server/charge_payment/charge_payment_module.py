@@ -731,6 +731,18 @@ class ChargePaymentModule:
             "charge:adjust",
             error_message="current user cannot create charge adjustments",
         )
+        with connect(self.config) as conn:
+            result = self.create_charge_adjustment_in_connection(conn, actor_user_id, payload)
+            conn.commit()
+        return result
+
+    def create_charge_adjustment_in_connection(self, conn, actor_user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # 在调用方事务内创建费用调整，供异常解决等跨模块流程复用。
+        self._assert_permission(
+            actor_user_id,
+            "charge:adjust",
+            error_message="current user cannot create charge adjustments",
+        )
         charge_id = _normalize_required_text(
             payload.get("chargeId") if "chargeId" in payload else payload.get("charge_id"),
             "chargeId",
@@ -741,48 +753,43 @@ class ChargePaymentModule:
             else payload.get("source_charge_id"),
             "sourceChargeId",
         )
+        self._require_charge_in_connection(conn, charge_id)
+        if source_charge_id is not None:
+            self._require_charge_in_connection(conn, source_charge_id)
 
-        with connect(self.config) as conn:
-            self._require_charge_in_connection(conn, charge_id)
-            if source_charge_id is not None:
-                self._require_charge_in_connection(conn, source_charge_id)
-
-            # The existing table only has approved_by. During this migration it stores
-            # the actor who created the adjustment, equivalent to the legacy createdBy field.
-            adjustment = self.repository.create_charge_adjustment(
-                conn,
-                {
-                    "charge_id": charge_id,
-                    "source_charge_id": source_charge_id,
-                    "delta_cny": _normalize_price_cny(
-                        payload.get("deltaCny") if "deltaCny" in payload else payload.get("delta_cny"),
-                        "deltaCny",
-                        allow_negative=True,
-                    ),
-                    "reason": _normalize_required_text(payload.get("reason"), "reason", 2),
-                    "source_type": _normalize_required_text(
-                        payload.get("sourceType") if "sourceType" in payload else payload.get("source_type"),
-                        "sourceType",
-                    ),
-                    "source_id": _normalize_required_text(
-                        payload.get("sourceId") if "sourceId" in payload else payload.get("source_id"),
-                        "sourceId",
-                    ),
-                    "approved_by": actor_user_id,
-                },
-            )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=actor_user_id,
-                action="charge_adjustment.create",
-                object_type="charge_adjustment",
-                object_id=adjustment["id"],
-                before=None,
-                after=adjustment,
-                reason=adjustment["reason"],
-            )
-            conn.commit()
-
+        # 现有表只有 approved_by，迁移期用它存发起调整的处理人。
+        adjustment = self.repository.create_charge_adjustment(
+            conn,
+            {
+                "charge_id": charge_id,
+                "source_charge_id": source_charge_id,
+                "delta_cny": _normalize_price_cny(
+                    payload.get("deltaCny") if "deltaCny" in payload else payload.get("delta_cny"),
+                    "deltaCny",
+                    allow_negative=True,
+                ),
+                "reason": _normalize_required_text(payload.get("reason"), "reason", 2),
+                "source_type": _normalize_required_text(
+                    payload.get("sourceType") if "sourceType" in payload else payload.get("source_type"),
+                    "sourceType",
+                ),
+                "source_id": _normalize_required_text(
+                    payload.get("sourceId") if "sourceId" in payload else payload.get("source_id"),
+                    "sourceId",
+                ),
+                "approved_by": actor_user_id,
+            },
+        )
+        self.audit_service.log_in_connection(
+            conn,
+            actor_user_id=actor_user_id,
+            action="charge_adjustment.create",
+            object_type="charge_adjustment",
+            object_id=adjustment["id"],
+            before=None,
+            after=adjustment,
+            reason=adjustment["reason"],
+        )
         return {"chargeAdjustmentId": adjustment["id"]}
 
     def _assert_permission(self, actor_user_id: str, permission: str, *, error_message: str) -> None:
