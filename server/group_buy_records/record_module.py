@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal
 from typing import Any, Callable
 
 from ..errors import AppError
@@ -33,7 +34,17 @@ GROUP_BUY_RECORD_STATUS_PRIORITY = {
     GROUP_BUY_RECORD_STATUS_ORDERED: 10,
 }
 DEFAULT_RECORD_SOURCE = "member_claim"
-ALLOWED_CHARGE_TYPES = {"goods", "international", "domestic_shipping"}
+CHARGE_TYPE_INITIAL_GOODS = "initial_goods"
+CHARGE_TYPE_INTERNATIONAL = "international"
+CHARGE_TYPE_DOMESTIC_SHIPPING = "domestic_shipping"
+CHARGE_TYPE_ALIASES = {
+    "goods": CHARGE_TYPE_INITIAL_GOODS,
+}
+ALLOWED_CHARGE_TYPES = {
+    CHARGE_TYPE_INITIAL_GOODS,
+    CHARGE_TYPE_INTERNATIONAL,
+    CHARGE_TYPE_DOMESTIC_SHIPPING,
+}
 ALLOWED_PAYMENT_TYPES = {"goods", "international"}
 
 
@@ -72,6 +83,8 @@ def ensure_group_buy_record_state(state: dict[str, Any]) -> bool:
             "domesticShippingChargeId": None,
             "dispatchRequestId": None,
             "transferId": None,
+            "sourceTransferId": None,
+            "sourceRecordId": None,
             "exceptionReason": None,
             "note": None,
             "source": DEFAULT_RECORD_SOURCE,
@@ -91,6 +104,9 @@ def ensure_group_buy_record_state(state: dict[str, Any]) -> bool:
             "isStocked": _infer_is_stocked(record),
             "isTransferPending": _infer_is_transfer_pending(record),
             "isCompleted": _infer_is_completed(record),
+            "isTransferredOut": bool(record.get("isTransferredOut", False)),
+            "transferredOutAt": record.get("transferredOutAt"),
+            "completedAt": record.get("completedAt"),
             "isException": bool(record.get("isException", False)),
         }
         for key, value in defaults.items():
@@ -266,6 +282,7 @@ class GroupBuyRecordsModule:
         self.now_iso = now_iso
         self.has_permission = has_permission
         self.can_view_group_buy = can_view_group_buy
+        self.create_charge: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def require_record(self, group_buy_record_id: str) -> dict[str, Any]:
         record = next(
@@ -302,6 +319,22 @@ class GroupBuyRecordsModule:
             for record in self.state["groupBuyRecords"]
             if record["groupBuyItemId"] == group_buy_item_id
         )
+
+    def list_group_buy_record_ids_by_charge(self, charge_id: str) -> list[str]:
+        return [
+            record["id"]
+            for record in self.state["groupBuyRecords"]
+            if charge_id
+            in {
+                record.get("goodsChargeId"),
+                record.get("internationalChargeId"),
+                record.get("domesticShippingChargeId"),
+            }
+        ]
+
+    def refresh_record_status(self, record: dict[str, Any]) -> dict[str, Any]:
+        self._refresh_record_status(record, group_buy=self._require_group_buy(record["groupBuyId"]))
+        return record
 
     def create_record(self, actor_user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         group_buy_id = _normalize_required_text(
@@ -384,6 +417,8 @@ class GroupBuyRecordsModule:
             "domesticShippingChargeId": None,
             "dispatchRequestId": None,
             "transferId": None,
+            "sourceTransferId": None,
+            "sourceRecordId": None,
             "isException": False,
             "exceptionReason": None,
             "statusPriority": _status_priority(GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT),
@@ -405,10 +440,14 @@ class GroupBuyRecordsModule:
             "isStocked": False,
             "shipmentId": None,
             "isTransferPending": False,
+            "isTransferredOut": False,
+            "transferredOutAt": None,
             "isCompleted": False,
+            "completedAt": None,
             "createdAt": self.now_iso(),
             "updatedAt": self.now_iso(),
         }
+        self._create_initial_goods_charge(record, group_buy=group_buy, item=item, actor_user_id=actor_user["id"])
         self._refresh_record_status(record, group_buy=group_buy)
         self.state["groupBuyRecords"].append(record)
 
@@ -428,6 +467,77 @@ class GroupBuyRecordsModule:
             "displayStatus": record["status"],
             "quantity": record["quantity"],
         }
+
+    def create_transfer_record(
+        self,
+        *,
+        source_record: dict[str, Any],
+        to_user_id: str,
+        quantity: int,
+        transfer_id: str,
+        actor_user_id: str,
+        note: str | None,
+    ) -> dict[str, Any]:
+        group_buy = self._require_group_buy(source_record["groupBuyId"])
+        now = self.now_iso()
+        record = {
+            "id": self.next_id("groupBuyRecord", "record"),
+            "groupBuyId": source_record["groupBuyId"],
+            "groupBuyItemId": source_record["groupBuyItemId"],
+            "memberUserId": to_user_id,
+            "status": source_record["status"],
+            "quantity": quantity,
+            # 已确认付款和费用 ID 留在原记录，新记录只继承“后续流程是否满足”的事实。
+            "goodsChargeId": None,
+            "goodsPaymentRecordId": None,
+            "internationalChargeId": None,
+            "internationalPaymentRecordId": None,
+            "domesticShippingChargeId": None,
+            "dispatchRequestId": None,
+            "transferId": None,
+            "sourceTransferId": transfer_id,
+            "sourceRecordId": source_record["id"],
+            "isException": bool(source_record.get("isException", False)),
+            "exceptionReason": source_record.get("exceptionReason"),
+            "statusPriority": _status_priority(source_record["status"]),
+            "note": note,
+            "source": "transfer_approved",
+            "goodsPaidConfirmed": bool(source_record.get("goodsPaidConfirmed", False)),
+            "needsInternationalFee": bool(
+                source_record.get("needsInternationalFee", self._needs_international_fee(group_buy))
+            ),
+            "internationalPaidConfirmed": bool(source_record.get("internationalPaidConfirmed", False)),
+            "needsTransfer": bool(source_record.get("needsTransfer", self._needs_transfer(group_buy))),
+            "enteredTransferFlow": bool(source_record.get("enteredTransferFlow", False)),
+            "needsDomesticStock": bool(source_record.get("needsDomesticStock", self._needs_domestic_stock(group_buy))),
+            "isOrdered": bool(source_record.get("isOrdered", False)),
+            "orderedSourceObjectType": source_record.get("orderedSourceObjectType"),
+            "orderedSourceObjectId": source_record.get("orderedSourceObjectId"),
+            "orderedReason": source_record.get("orderedReason"),
+            "warehouseUserId": None,
+            "stockedAt": None,
+            "isStocked": bool(source_record.get("isStocked", False)),
+            "shipmentId": None,
+            "isTransferPending": False,
+            "isTransferredOut": False,
+            "transferredOutAt": None,
+            "isCompleted": False,
+            "completedAt": None,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        self._refresh_record_status(record, group_buy=group_buy)
+        self.state["groupBuyRecords"].append(record)
+        self.audit_log(
+            actor_user_id=actor_user_id,
+            action="record.transfer_in",
+            object_type="group_buy_record",
+            object_id=record["id"],
+            before=None,
+            after=clone(record),
+            reason=note or "转单审核通过",
+        )
+        return record
 
     def update_record_quantity(
         self,
@@ -496,6 +606,7 @@ class GroupBuyRecordsModule:
             payload.get("chargeType") if "chargeType" in payload else payload.get("charge_type"),
             "费用类型",
         )
+        charge_type = CHARGE_TYPE_ALIASES.get(charge_type, charge_type)
         charge_id = _normalize_required_text(
             payload.get("chargeId") if "chargeId" in payload else payload.get("charge_id"),
             "费用",
@@ -506,9 +617,9 @@ class GroupBuyRecordsModule:
         record = self.require_record(group_buy_record_id)
         before = clone(record)
 
-        if charge_type == "goods":
+        if charge_type == CHARGE_TYPE_INITIAL_GOODS:
             record["goodsChargeId"] = charge_id
-        elif charge_type == "international":
+        elif charge_type == CHARGE_TYPE_INTERNATIONAL:
             record["internationalChargeId"] = charge_id
             record["needsInternationalFee"] = True
             record["internationalPaidConfirmed"] = False
@@ -770,50 +881,45 @@ class GroupBuyRecordsModule:
 
         return {"updatedCount": updated_count}
 
-    def mark_exception(
+    def mark_completed(
         self,
-        actor_user: dict[str, Any],
         payload: dict[str, Any],
+        *,
+        actor_user_id: str | None = None,
     ) -> dict[str, Any]:
-        if not self.has_permission(actor_user, "record:mark_exception"):
-            raise AppError(403, "当前账号没有标记异常的权限", "FORBIDDEN")
+        group_buy_record_ids = self._normalize_record_id_list(payload.get("groupBuyRecordIds"))
+        dispatch_request_id = _normalize_required_text(
+            payload.get("dispatchRequestId")
+            if "dispatchRequestId" in payload
+            else payload.get("dispatch_request_id"),
+            "排发申请",
+        )
+        completed_at = _normalize_required_text(
+            payload.get("completedAt") if "completedAt" in payload else payload.get("completed_at"),
+            "完成时间",
+        )
 
-        group_buy_record_id = _normalize_required_text(
-            payload.get("groupBuyRecordId")
-            if "groupBuyRecordId" in payload
-            else payload.get("group_buy_record_id"),
-            "拼单记录",
-        )
-        exception_reason = _normalize_required_text(
-            payload.get("exceptionReason")
-            if "exceptionReason" in payload
-            else payload.get("exception_reason"),
-            "异常原因",
-            2,
-        )
-        note = _normalize_optional_text(payload.get("note"), "note")
+        updated_count = 0
+        for record_id in group_buy_record_ids:
+            record = self.require_record(record_id)
+            before = clone(record)
+            record["dispatchRequestId"] = dispatch_request_id
+            record["isCompleted"] = True
+            record["completedAt"] = completed_at
+            self._refresh_record_status(record, group_buy=self._require_group_buy(record["groupBuyId"]))
+            record["updatedAt"] = self.now_iso()
+            self.audit_log(
+                actor_user_id=actor_user_id,
+                action="record.mark_completed",
+                object_type="group_buy_record",
+                object_id=record["id"],
+                before=before,
+                after=clone(record),
+                reason="排发完成",
+            )
+            updated_count += 1
 
-        record = self.require_record(group_buy_record_id)
-        before = clone(record)
-        record["isException"] = True
-        record["exceptionReason"] = exception_reason
-        if note is not None:
-            record["note"] = note
-        self._refresh_record_status(record, group_buy=self._require_group_buy(record["groupBuyId"]))
-        record["updatedAt"] = self.now_iso()
-        self.audit_log(
-            actor_user_id=actor_user["id"],
-            action="record.mark_exception",
-            object_type="group_buy_record",
-            object_id=record["id"],
-            before=before,
-            after=clone(record),
-            reason=exception_reason,
-        )
-        return {
-            "groupBuyRecordId": record["id"],
-            "isException": record["isException"],
-        }
+        return {"updatedCount": updated_count}
 
     def recalculate_display_status(
         self,
@@ -930,6 +1036,40 @@ class GroupBuyRecordsModule:
         if not record_ids:
             raise AppError(400, "groupBuyRecordIds不能为空", "VALIDATION_FAILED")
         return record_ids
+
+    def _create_initial_goods_charge(
+        self,
+        record: dict[str, Any],
+        *,
+        group_buy: dict[str, Any],
+        item: dict[str, Any],
+        actor_user_id: str,
+    ) -> None:
+        if self.create_charge is None:
+            return
+
+        unit_price = Decimal(str(item["unitPriceCny"]))
+        amount_cny = f"{(unit_price * Decimal(record['quantity'])).quantize(Decimal('0.00'))}"
+        result = self.create_charge(
+            {
+                "type": CHARGE_TYPE_INITIAL_GOODS,
+                "payerUserId": record["memberUserId"],
+                "payeeUserId": group_buy["createdByUserId"],
+                "bizType": "group_buy_record",
+                "bizId": record["id"],
+                "amountCny": amount_cny,
+                "snapshot": {
+                    "groupBuyRecordId": record["id"],
+                    "groupBuyId": record["groupBuyId"],
+                    "groupBuyItemId": record["groupBuyItemId"],
+                    "quantity": record["quantity"],
+                    "unitPriceCny": item["unitPriceCny"],
+                },
+                "note": "商品首款",
+                "actorUserId": actor_user_id,
+            }
+        )
+        record["goodsChargeId"] = result["chargeId"]
 
     def _needs_international_fee(self, group_buy: dict[str, Any]) -> bool:
         return group_buy.get("type") not in GROUP_BUY_TYPES_WITHOUT_INTERNATIONAL

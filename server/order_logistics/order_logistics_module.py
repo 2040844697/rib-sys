@@ -240,6 +240,7 @@ class OrderLogisticsModule:
         enter_transfer_flow: Callable[..., dict[str, Any]],
         link_charge: Callable[..., dict[str, Any]],
         create_charge: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        stock_in_batch: Callable[..., dict[str, Any]] | None = None,
     ):
         self.state = state
         self.next_id = next_id
@@ -253,6 +254,7 @@ class OrderLogisticsModule:
         self.enter_transfer_flow = enter_transfer_flow
         self.link_charge = link_charge
         self.create_charge = create_charge
+        self.stock_in_batch = stock_in_batch
 
     def require_order_screenshot(self, order_screenshot_id: str) -> dict[str, Any]:
         screenshot = next(
@@ -761,6 +763,17 @@ class OrderLogisticsModule:
             "status": batch["status"],
             "groupBuyRecordIds": record_ids,
         }
+
+    def stock_in_batch_records(
+        self,
+        actor_user_id: str,
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.assert_manage_permission(actor_user_id)
+        if self.stock_in_batch is None:
+            raise RuntimeError("Warehouse stock-in dependency is required.")
+        return self.stock_in_batch(batch_id, payload, actor_user_id=actor_user_id)
 
     def record_batch_fees(
         self,
