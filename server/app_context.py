@@ -8,6 +8,7 @@ from .config import Config
 from .db_access import connect
 from .errors import AppError
 from .file_audit import DatabaseAuditService, DatabaseFileService
+from .group_buy_management import GroupBuyModule, GroupBuyRepository
 from .goods_catalog import GoodsCatalogModule, GoodsCatalogRepository
 from .store import Store, create_store, has_permission
 
@@ -46,6 +47,7 @@ class AppContext:
         )
         self.group_buy_records_module = getattr(self.runtime, "group_buy_records_module", None)
         self.charge_payment_module = self._build_charge_payment_module()
+        self.group_buy_management_module = self._build_group_buy_management_module()
         self.order_logistics_module = getattr(self.runtime, "order_logistics_module", None)
         self.transfer_exception_module = getattr(self.runtime, "transfer_exception_module", None)
         self.warehouse_dispatch_module = getattr(self.runtime, "warehouse_dispatch_module", None)
@@ -70,6 +72,24 @@ class AppContext:
             on_charge_confirmed=self.on_charge_confirmed,
         )
 
+    def _build_group_buy_management_module(self) -> GroupBuyModule | None:
+        if not self.config.database_url:
+            return None
+        return GroupBuyModule(
+            self.config,
+            repository=GroupBuyRepository(self.config),
+            get_goods_snapshot=self.goods_catalog_module.get_goods_snapshot,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            has_group_access=self.has_group_access_by_user_id,
+            has_permission=self.has_permission_by_user_id,
+            audit_service=self.audit_service,
+            create_charge_from_related_module=(
+                self.charge_payment_module.create_charge_from_related_module_in_connection
+                if self.charge_payment_module is not None
+                else None
+            ),
+        )
+
     def _wire_charge_payment_dependencies(self) -> None:
         if self.charge_payment_module is None:
             return
@@ -92,6 +112,11 @@ class AppContext:
             self.transfer_exception_module.record_exceptions.create_charge_adjustment = (
                 self.charge_payment_module.create_charge_adjustment
             )
+        if (
+            self.group_buy_management_module is not None
+            and self.order_logistics_module is not None
+        ):
+            self.order_logistics_module.get_group_buy_for_write = self.get_group_buy_for_write
 
     @property
     def startup_info(self) -> dict[str, Any]:
@@ -121,6 +146,12 @@ class AppContext:
     def has_permission_by_user_id(self, user_id: str, permission: str) -> bool:
         user = self.get_user_snapshot_by_id(user_id)
         return user is not None and has_permission(user, permission)
+
+    def has_group_access_by_user_id(self, user_id: str, group_id: str) -> bool:
+        user = self.get_user_snapshot_by_id(user_id)
+        if user is None:
+            return False
+        return "admin" in user.get("roles", []) or user.get("groupId") == group_id
 
     def on_charge_confirmed(
         self,
@@ -187,13 +218,142 @@ class AppContext:
             return self.auth.build_bootstrap(current_user)
         return self.runtime.build_bootstrap(current_user)
 
+    def build_groups(self, user: dict[str, Any]) -> dict[str, Any]:
+        result = self.runtime.build_groups(user)
+        if self.group_buy_management_module is not None:
+            for group in result.get("items", []):
+                active_group_buys = self.group_buy_management_module.build_group_buys(
+                    group["id"],
+                    user["id"],
+                    {"status": "进行中", "keyword": None},
+                )
+                group["activeGroupBuyCount"] = active_group_buys["total"]
+        return result
+
     def build_group_home(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
         result = self.runtime.build_group_home(group_id, user)
+        if self.group_buy_management_module is not None:
+            active_group_buys = self.group_buy_management_module.build_group_buys(
+                group_id,
+                user["id"],
+                {"status": "进行中", "keyword": None},
+            )
+            result["summary"]["activeGroupBuyCount"] = active_group_buys["total"]
         if self.charge_payment_module is not None:
             result["summary"]["myPendingPaymentCount"] = (
                 self.charge_payment_module.count_pending_charges_for_user(user["id"])
             )
         return result
+
+    def _require_group_buy_management_module(self) -> GroupBuyModule:
+        if self.group_buy_management_module is None:
+            raise RuntimeError("Group buy management database module requires DATABASE_URL.")
+        return self.group_buy_management_module
+
+    def build_group_buys(
+        self,
+        group_id: str,
+        user: dict[str, Any],
+        filters: dict[str, str | None],
+    ) -> dict[str, Any]:
+        # 团购列表主路径：只读数据库团购和商品聚合。
+        return self._require_group_buy_management_module().build_group_buys(
+            group_id,
+            user["id"],
+            filters,
+        )
+
+    def build_group_buy_detail(self, group_buy_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        # 团购详情主路径：只读数据库商品库存和当前用户认领记录。
+        return self._require_group_buy_management_module().build_group_buy_detail(
+            group_buy_id,
+            user["id"],
+        )
+
+    def create_group_buy(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 新建团购：DB 版负责校验权限、写业务表和审计。
+        return self._require_group_buy_management_module().create_group_buy(user["id"], payload)
+
+    def update_group_buy(
+        self,
+        user: dict[str, Any],
+        group_buy_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 更新团购基础信息。
+        return self._require_group_buy_management_module().update_group_buy(
+            user["id"],
+            group_buy_id,
+            payload,
+        )
+
+    def change_group_buy_status(
+        self,
+        user: dict[str, Any],
+        group_buy_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 团购状态流转，合法性由 DB 版模块统一判断。
+        return self._require_group_buy_management_module().change_group_buy_status(
+            user["id"],
+            group_buy_id,
+            payload,
+        )
+
+    def create_group_buy_item(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 新建团购商品，可引用 goods 快照或手填快照。
+        return self._require_group_buy_management_module().create_group_buy_item(
+            user["id"],
+            payload,
+        )
+
+    def update_group_buy_item(
+        self,
+        user: dict[str, Any],
+        group_buy_item_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 更新团购商品快照、库存和价格。
+        return self._require_group_buy_management_module().update_group_buy_item(
+            user["id"],
+            group_buy_item_id,
+            payload,
+        )
+
+    def claim_group_buy_item(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 成员认领：同一事务内扣库存、写记录、生成首款费用。
+        return self._require_group_buy_management_module().claim_group_buy_item(
+            user["id"],
+            payload,
+        )
+
+    def release_group_buy_item_stock(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 释放已认领库存，供维护动作显式调用。
+        return self._require_group_buy_management_module().release_item_stock(
+            user["id"],
+            payload,
+        )
+
+    def request_price_adjustment(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        # 提交调价申请，价格仍按“分”落库。
+        return self._require_group_buy_management_module().request_price_adjustment(
+            user["id"],
+            payload,
+        )
+
+    def get_group_buy_for_write(self, actor_user_id: str, group_buy_id: str) -> dict[str, Any]:
+        # 迁移期供下单转运模块校验团购存在性，仍然只读 DB 团购表。
+        module = self._require_group_buy_management_module()
+        module._assert_permission(
+            actor_user_id,
+            "group_buy:update_any",
+            error_message="当前账号没有下单转运维护权限",
+        )
+        with connect(self.config) as conn:
+            group_buy = module._require_group_buy(conn, group_buy_id)
+            conn.rollback()
+        module._require_group_access(actor_user_id, group_buy["groupId"])
+        return group_buy
 
     def read_me(self, current_user: dict[str, Any]) -> dict[str, Any]:
         if self.auth.is_enabled():

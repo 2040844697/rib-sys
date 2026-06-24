@@ -192,6 +192,26 @@ class ChargePaymentModule:
         normalized_payload.pop("actor_user_id", None)
         return self.create_charge(normalized_payload, actor_user_id=actor_user_id)
 
+    def create_charge_from_related_module_in_connection(
+        self,
+        conn,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        # 给其他 DB 模块在同一事务里创建费用，避免业务记录和费用记录半成功。
+        actor_user_id = None
+        if "actorUserId" in payload or "actor_user_id" in payload:
+            _, raw_actor_user_id = _payload_get(payload, "actorUserId", "actor_user_id")
+            actor_user_id = _normalize_optional_text(raw_actor_user_id, "actorUserId")
+
+        normalized_payload = dict(payload)
+        normalized_payload.pop("actorUserId", None)
+        normalized_payload.pop("actor_user_id", None)
+        return self.create_charge_in_connection(
+            conn,
+            normalized_payload,
+            actor_user_id=actor_user_id,
+        )
+
     def create_payment_channel(self, actor_user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         owner_user_id = _normalize_required_text(
             payload.get("ownerUserId") if "ownerUserId" in payload else payload.get("owner_user_id"),
@@ -268,6 +288,24 @@ class ChargePaymentModule:
         *,
         actor_user_id: str | None = None,
     ) -> dict[str, Any]:
+        with connect(self.config) as conn:
+            result = self.create_charge_in_connection(
+                conn,
+                payload,
+                actor_user_id=actor_user_id,
+            )
+            conn.commit()
+
+        return result
+
+    def create_charge_in_connection(
+        self,
+        conn,
+        payload: dict[str, Any],
+        *,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        # 费用创建本体不提交事务，调用方决定何时 commit。
         charge_type = self._normalize_charge_type(payload.get("type"))
         payer_user_id = _normalize_required_text(
             payload.get("payerUserId") if "payerUserId" in payload else payload.get("payer_user_id"),
@@ -285,43 +323,41 @@ class ChargePaymentModule:
         )
         snapshot = self._normalize_snapshot(payload)
 
-        with connect(self.config) as conn:
-            charge = self.repository.create_charge(
-                conn,
-                {
-                    "type": charge_type,
-                    "payer_user_id": payer_user_id,
-                    "payee_user_id": payee_user_id,
-                    "biz_type": _normalize_required_text(
-                        payload.get("bizType") if "bizType" in payload else payload.get("biz_type"),
-                        "bizType",
-                    ),
-                    "biz_id": _normalize_required_text(
-                        payload.get("bizId") if "bizId" in payload else payload.get("biz_id"),
-                        "bizId",
-                    ),
-                    "amount_cny": amount_cny,
-                    "payment_channel_id": _normalize_optional_text(
-                        payload.get("paymentChannelId")
-                        if "paymentChannelId" in payload
-                        else payload.get("payment_channel_id"),
-                        "paymentChannelId",
-                    ),
-                    "snapshot": snapshot,
-                    "note": _normalize_optional_text(payload.get("note"), "note"),
-                },
-            )
-            self.audit_service.log_in_connection(
-                conn,
-                actor_user_id=actor_user_id,
-                action="charge.create",
-                object_type="charge",
-                object_id=charge["id"],
-                before=None,
-                after=charge,
-                reason="create charge",
-            )
-            conn.commit()
+        charge = self.repository.create_charge(
+            conn,
+            {
+                "type": charge_type,
+                "payer_user_id": payer_user_id,
+                "payee_user_id": payee_user_id,
+                "biz_type": _normalize_required_text(
+                    payload.get("bizType") if "bizType" in payload else payload.get("biz_type"),
+                    "bizType",
+                ),
+                "biz_id": _normalize_required_text(
+                    payload.get("bizId") if "bizId" in payload else payload.get("biz_id"),
+                    "bizId",
+                ),
+                "amount_cny": amount_cny,
+                "payment_channel_id": _normalize_optional_text(
+                    payload.get("paymentChannelId")
+                    if "paymentChannelId" in payload
+                    else payload.get("payment_channel_id"),
+                    "paymentChannelId",
+                ),
+                "snapshot": snapshot,
+                "note": _normalize_optional_text(payload.get("note"), "note"),
+            },
+        )
+        self.audit_service.log_in_connection(
+            conn,
+            actor_user_id=actor_user_id,
+            action="charge.create",
+            object_type="charge",
+            object_id=charge["id"],
+            before=None,
+            after=charge,
+            reason="create charge",
+        )
 
         return {
             "chargeId": charge["id"],

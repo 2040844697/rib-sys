@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Callable
 
 from ..config import Config
 from ..db_access import connect
 from ..errors import AppError
+from ..file_audit import DatabaseAuditService
 from .group_buy_repo import GroupBuyRepository
 
 
@@ -24,6 +25,9 @@ ALLOWED_GROUP_BUY_TYPES = {
     "国外二手",
     "群友出物",
     "国内现货",
+    "补款",
+    "补寄",
+    "现货加开",
 }
 ALLOWED_GROUP_BUY_STATUSES = {
     GROUP_BUY_STATUS_WAITING,
@@ -59,6 +63,21 @@ CLAIMABLE_GROUP_BUY_STATUSES = {
     GROUP_BUY_STATUS_SPLIT,
 }
 PRICE_ADJUSTMENT_STATUS_PENDING_REVIEW = "pending_review"
+GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT = "未肾"
+GROUP_BUY_RECORD_STATUS_ORDERED = "已下单"
+GROUP_BUY_RECORD_STATUS_PRIORITY = {
+    "转单中": 1,
+    "已完结": 2,
+    "已排发": 3,
+    "已申请排发": 4,
+    GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT: 5,
+    "未补国际": 6,
+    "未转寄": 7,
+    "未到货": 8,
+    "可排发": 9,
+    GROUP_BUY_RECORD_STATUS_ORDERED: 10,
+}
+CHARGE_TYPE_INITIAL_GOODS = "initial_goods"
 
 
 def _normalize_required_text(value: Any, field_name: str, min_length: int = 1) -> str:
@@ -143,9 +162,25 @@ def _normalize_price_cny(value: Any, field_name: str) -> str:
         amount = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise AppError(400, f"{field_name}格式不正确", "VALIDATION_FAILED") from exc
+    quantized = amount.quantize(Decimal("0.00"))
+    if amount != quantized:
+        raise AppError(400, f"{field_name}最多支持两位小数", "VALIDATION_FAILED")
     if amount < 0:
         raise AppError(400, f"{field_name}不能小于 0", "VALIDATION_FAILED")
+    return f"{quantized}"
+
+
+def _multiply_price_cny(unit_price_cny: str, quantity: int) -> str:
+    # 金额始终以 Decimal 计算，避免 float 让“分”语义漂移。
+    amount = Decimal(str(unit_price_cny)) * Decimal(quantity)
     return f"{amount.quantize(Decimal('0.00'))}"
+
+
+def _status_priority(status: str | None) -> int:
+    return GROUP_BUY_RECORD_STATUS_PRIORITY.get(
+        status or "",
+        GROUP_BUY_RECORD_STATUS_PRIORITY[GROUP_BUY_RECORD_STATUS_ORDERED],
+    )
 
 
 def _parse_datetime(value: Any, field_name: str) -> datetime | None:
@@ -176,6 +211,8 @@ class GroupBuyModule:
         get_user_snapshot_by_id=None,
         has_group_access=None,
         has_permission=None,
+        audit_service: DatabaseAuditService | None = None,
+        create_charge_from_related_module: Callable[..., dict[str, Any]] | None = None,
     ):
         self.config = config
         self.repo = repository or GroupBuyRepository(config)
@@ -183,10 +220,38 @@ class GroupBuyModule:
         self.get_user_snapshot_by_id = get_user_snapshot_by_id
         self.has_group_access = has_group_access
         self.has_permission = has_permission
+        self.audit_service = audit_service
+        self.create_charge_from_related_module = create_charge_from_related_module
 
     def _assert_database_enabled(self) -> None:
         if not self.config.database_url:
             raise RuntimeError("DATABASE_URL is required for group buy management module.")
+
+    def _audit(
+        self,
+        conn,
+        *,
+        actor_user_id: str | None,
+        action: str,
+        object_type: str,
+        object_id: str,
+        before: Any,
+        after: Any,
+        reason: str | None,
+    ) -> None:
+        # 统一走 file_audit 的数据库审计服务，仓储只负责团购业务表。
+        if self.audit_service is None:
+            return
+        self.audit_service.log_in_connection(
+            conn,
+            actor_user_id=actor_user_id,
+            action=action,
+            object_type=object_type,
+            object_id=object_id,
+            before=before,
+            after=after,
+            reason=reason,
+        )
 
     def _require_group_access(self, actor_user_id: str, group_id: str) -> None:
         if self.has_group_access is None:
@@ -218,6 +283,12 @@ class GroupBuyModule:
             raise AppError(404, "拼单商品不存在", "NOT_FOUND")
         return group_buy_item
 
+    def _require_group_buy_item_for_update(self, conn, group_buy_item_id: str) -> dict[str, Any]:
+        group_buy_item = self.repo.get_group_buy_item_by_id(conn, group_buy_item_id, lock=True)
+        if group_buy_item is None:
+            raise AppError(404, "拼单商品不存在", "NOT_FOUND")
+        return group_buy_item
+
     def _assert_group_buy_mutable(self, group_buy: dict[str, Any]) -> None:
         if group_buy["status"] in {GROUP_BUY_STATUS_COMPLETED, GROUP_BUY_STATUS_CANCELLED}:
             raise AppError(400, "已完成或已取消的拼单暂不允许修改", "INVALID_STATUS")
@@ -231,6 +302,30 @@ class GroupBuyModule:
             actor_user_id,
             "group_buy:update_own",
         )
+
+    def _can_create_record_for_member(self, actor_user_id: str, member_user_id: str) -> bool:
+        if actor_user_id == member_user_id:
+            return self.has_permission is None or self.has_permission(actor_user_id, "record:create_self")
+        return self.has_permission is None or self.has_permission(actor_user_id, "record:create_for_member")
+
+    def _require_member_in_group(self, member_user_id: str, group_id: str) -> None:
+        if self.get_user_snapshot_by_id is None:
+            return
+        member = self.get_user_snapshot_by_id(member_user_id)
+        if member is None:
+            raise AppError(404, "成员不存在", "NOT_FOUND")
+        if "admin" not in member.get("roles", []) and member.get("groupId") != group_id:
+            raise AppError(400, "成员不属于当前谷团", "VALIDATION_FAILED")
+
+    def _normalize_status_filter(self, status_filter: str | None) -> list[str] | None:
+        # 前端筛选项沿用旧接口语义，DB 查询时转换成明确状态列表。
+        if not status_filter or status_filter == "全部":
+            return None
+        if status_filter == "进行中":
+            return sorted(CLAIMABLE_GROUP_BUY_STATUSES)
+        if status_filter == "未开始":
+            return [GROUP_BUY_STATUS_WAITING]
+        return [_normalize_group_buy_status(status_filter)]
 
     def _build_item_snapshot_from_goods(self, goods_id: str) -> dict[str, Any]:
         if self.get_goods_snapshot is None:
@@ -331,6 +426,86 @@ class GroupBuyModule:
                 "INVALID_STATUS",
             )
 
+    def build_group_buys(
+        self,
+        group_id: str,
+        actor_user_id: str,
+        filters: dict[str, str | None],
+    ) -> dict[str, Any]:
+        self._assert_database_enabled()
+        self._require_group_access(actor_user_id, group_id)
+        statuses = self._normalize_status_filter(filters.get("status"))
+        keyword = _normalize_optional_text(filters.get("keyword"), "keyword")
+
+        with connect(self.config) as conn:
+            items = self.repo.list_group_buys(
+                conn,
+                group_id=group_id,
+                member_user_id=actor_user_id,
+                statuses=statuses,
+                keyword=keyword,
+            )
+            conn.rollback()
+
+        return {"items": items, "total": len(items)}
+
+    def build_group_buy_detail(self, group_buy_id: str, actor_user_id: str) -> dict[str, Any]:
+        self._assert_database_enabled()
+
+        with connect(self.config) as conn:
+            group_buy = self._require_group_buy(conn, group_buy_id)
+            self._require_group_access(actor_user_id, group_buy["groupId"])
+            items = self.repo.list_group_buy_items(conn, group_buy_id)
+            my_records = self.repo.list_member_records(
+                conn,
+                group_buy_id=group_buy_id,
+                member_user_id=actor_user_id,
+            )
+            conn.rollback()
+
+        return {
+            "groupBuy": {
+                "id": group_buy["id"],
+                "groupId": group_buy["groupId"],
+                "title": group_buy["title"],
+                "type": group_buy["type"],
+                "status": group_buy["status"],
+                "description": group_buy["description"],
+                "closeAt": group_buy["closeAt"],
+                "paymentChannelId": group_buy["paymentChannelId"],
+                "warehouseUserId": group_buy["warehouseUserId"],
+            },
+            "items": [
+                {
+                    **item,
+                    "status": "可拼" if item["availableQuantity"] > 0 else "已满",
+                }
+                for item in items
+            ],
+            "myRecords": [
+                {
+                    "id": record["id"],
+                    "groupBuyItemId": record["groupBuyItemId"],
+                    "quantity": record["quantity"],
+                    "displayStatus": record["displayStatus"],
+                    "isException": record["isException"],
+                }
+                for record in my_records
+            ],
+            "capabilities": {
+                "canClaim": (
+                    self.has_permission is None
+                    or self.has_permission(actor_user_id, "record:create_self")
+                )
+                and group_buy["status"] in CLAIMABLE_GROUP_BUY_STATUSES,
+                "canEdit": self._can_edit_group_buy(actor_user_id, group_buy),
+                "canUploadOrderScreenshot": self.has_permission is None
+                or self.has_permission(actor_user_id, "group_buy:update_any"),
+                "canManageRecords": self.has_permission is None
+                or self.has_permission(actor_user_id, "record:view_group"),
+            },
+        }
+
     def create_group_buy(self, actor_user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._assert_database_enabled()
         self._assert_permission(actor_user_id, "group_buy:create", error_message="当前账号没有创建拼单的权限")
@@ -367,7 +542,7 @@ class GroupBuyModule:
                     "默认囤货人",
                 ),
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy.create",
@@ -437,7 +612,7 @@ class GroupBuyModule:
             if not updated_fields:
                 raise AppError(400, "没有可更新的字段", "VALIDATION_FAILED")
 
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy.update",
@@ -484,7 +659,7 @@ class GroupBuyModule:
                 group_buy_id=group_buy_id,
                 new_status=new_status,
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy.change_status",
@@ -572,7 +747,7 @@ class GroupBuyModule:
                 available_quantity=total_quantity - reserved_quantity,
                 note=_normalize_optional_text(payload.get("note"), "备注"),
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy_item.create",
@@ -770,7 +945,7 @@ class GroupBuyModule:
             if not updated_fields:
                 raise AppError(400, "没有可更新的字段", "VALIDATION_FAILED")
 
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy_item.update",
@@ -782,6 +957,164 @@ class GroupBuyModule:
             )
             conn.commit()
         return {"groupBuyItemId": group_buy_item_id, "updatedFields": updated_fields}
+
+    def claim_group_buy_item(
+        self,
+        actor_user_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._assert_database_enabled()
+        group_buy_item_id = _normalize_required_text(
+            payload.get("groupBuyItemId")
+            if "groupBuyItemId" in payload
+            else payload.get("group_buy_item_id"),
+            "拼单商品",
+        )
+        payload_group_buy_id = _normalize_optional_text(
+            payload.get("groupBuyId") if "groupBuyId" in payload else payload.get("group_buy_id"),
+            "拼单",
+        )
+        member_user_id = _normalize_optional_text(
+            payload.get("memberUserId")
+            if "memberUserId" in payload
+            else payload.get("member_user_id"),
+            "成员",
+        ) or actor_user_id
+        quantity = _normalize_positive_int(payload.get("quantity"), "数量")
+        note = _normalize_optional_text(payload.get("note"), "备注")
+
+        with connect(self.config) as conn:
+            group_buy_item = self._require_group_buy_item_for_update(conn, group_buy_item_id)
+            group_buy = self._require_group_buy(conn, group_buy_item["groupBuyId"])
+            if payload_group_buy_id is not None and payload_group_buy_id != group_buy["id"]:
+                raise AppError(400, "拼单商品不属于当前拼单", "VALIDATION_FAILED")
+            self._require_group_access(actor_user_id, group_buy["groupId"])
+            self._require_member_in_group(member_user_id, group_buy["groupId"])
+            if not self._can_create_record_for_member(actor_user_id, member_user_id):
+                raise AppError(403, "当前账号没有创建拼单记录的权限", "FORBIDDEN")
+            if group_buy["status"] not in CLAIMABLE_GROUP_BUY_STATUSES:
+                raise AppError(400, "当前拼单状态暂时不能认领", "INVALID_STATUS")
+            if quantity > group_buy_item["availableQuantity"]:
+                raise AppError(400, "可认领数量不足", "INSUFFICIENT_STOCK")
+
+            item_after_claim = self.repo.update_group_buy_item_quantities(
+                conn,
+                group_buy_item_id=group_buy_item_id,
+                reserved_quantity=group_buy_item["reservedQuantity"],
+                claimed_quantity=group_buy_item["claimedQuantity"] + quantity,
+                available_quantity=group_buy_item["availableQuantity"] - quantity,
+            )
+            self._audit(
+                conn,
+                actor_user_id=actor_user_id,
+                action="group_buy_item.claim_stock",
+                object_type="group_buy_item",
+                object_id=group_buy_item_id,
+                before=group_buy_item,
+                after=item_after_claim,
+                reason=f"成员 {member_user_id} 认领 {quantity} 件",
+            )
+
+            existing_record = self.repo.get_group_buy_record_for_member(
+                conn,
+                group_buy_item_id=group_buy_item_id,
+                member_user_id=member_user_id,
+                lock=True,
+            )
+            if existing_record is None:
+                record = self.repo.create_group_buy_record(
+                    conn,
+                    group_buy_id=group_buy["id"],
+                    group_buy_item_id=group_buy_item_id,
+                    member_user_id=member_user_id,
+                    status=GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT,
+                    quantity=quantity,
+                    status_priority=_status_priority(GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT),
+                    note=note,
+                )
+                self._audit(
+                    conn,
+                    actor_user_id=actor_user_id,
+                    action="record.create",
+                    object_type="group_buy_record",
+                    object_id=record["id"],
+                    before=None,
+                    after=record,
+                    reason="成员认领商品" if actor_user_id == member_user_id else "维护人代成员建单",
+                )
+            else:
+                record_before = existing_record
+                record = self.repo.update_group_buy_record_quantity(
+                    conn,
+                    group_buy_record_id=existing_record["id"],
+                    quantity=existing_record["quantity"] + quantity,
+                    status=existing_record["status"],
+                    status_priority=_status_priority(existing_record["status"]),
+                )
+                self._audit(
+                    conn,
+                    actor_user_id=actor_user_id,
+                    action="record.update_quantity",
+                    object_type="group_buy_record",
+                    object_id=record["id"],
+                    before=record_before,
+                    after=record,
+                    reason="成员追加认领" if actor_user_id == member_user_id else "维护人代成员追加认领",
+                )
+
+            if (
+                self.create_charge_from_related_module is not None
+                and record.get("goodsChargeId") is None
+                and group_buy.get("ownerUserId")
+            ):
+                charge = self.create_charge_from_related_module(
+                    conn,
+                    {
+                        "type": CHARGE_TYPE_INITIAL_GOODS,
+                        "payerUserId": member_user_id,
+                        "payeeUserId": group_buy["ownerUserId"],
+                        "bizType": "group_buy_record",
+                        "bizId": record["id"],
+                        "amountCny": _multiply_price_cny(group_buy_item["unitPriceCny"], quantity),
+                        "paymentChannelId": group_buy["paymentChannelId"],
+                        "snapshot": {
+                            "groupBuyRecordId": record["id"],
+                            "groupBuyId": group_buy["id"],
+                            "groupBuyItemId": group_buy_item_id,
+                            "quantity": quantity,
+                            "unitPriceCny": group_buy_item["unitPriceCny"],
+                        },
+                        "note": "商品首款",
+                        "actorUserId": actor_user_id,
+                    },
+                )
+                record_before_link, record = self.repo.link_group_buy_record_charge(
+                    conn,
+                    group_buy_record_id=record["id"],
+                    charge_type=CHARGE_TYPE_INITIAL_GOODS,
+                    charge_id=charge["chargeId"],
+                )
+                self._audit(
+                    conn,
+                    actor_user_id=actor_user_id,
+                    action="record.link_charge",
+                    object_type="group_buy_record",
+                    object_id=record["id"],
+                    before=record_before_link,
+                    after=record,
+                    reason="关联商品首款费用",
+                )
+
+            conn.commit()
+
+        return {
+            "groupBuyRecordId": record["id"],
+            "recordId": record["id"],
+            "status": record["status"],
+            "displayStatus": record["displayStatus"],
+            "quantity": record["quantity"],
+            "availableQuantity": item_after_claim["availableQuantity"],
+        }
 
     def reserve_or_claim_item_stock(
         self,
@@ -831,7 +1164,7 @@ class GroupBuyModule:
                 # 占库存时同步维护 claimed / available，避免记录模块外再做一层补算。
                 available_quantity=available_quantity - quantity,
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy_item.claim_stock",
@@ -880,7 +1213,7 @@ class GroupBuyModule:
                 claimed_quantity=group_buy_item["claimedQuantity"] - quantity,
                 available_quantity=group_buy_item["availableQuantity"] + quantity,
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="group_buy_item.release_stock",
@@ -943,7 +1276,7 @@ class GroupBuyModule:
                 status=PRICE_ADJUSTMENT_STATUS_PENDING_REVIEW,
                 requested_by=actor_user_id,
             )
-            self.repo.create_audit_log(
+            self._audit(
                 conn,
                 actor_user_id=actor_user_id,
                 action="price_adjustment.request",

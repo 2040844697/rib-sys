@@ -17,9 +17,6 @@ from .transfer_exception import TransferExceptionModule, ensure_transfer_excepti
 from .warehouse_dispatch import WarehouseDispatchModule, ensure_warehouse_dispatch_state
 
 
-ACTIVE_GROUP_BUY_STATUSES = {"拼拼拼", "已切"}
-CLAIMABLE_GROUP_BUY_STATUSES = {"拼拼拼", "已切"}
-
 ROLE_PERMISSIONS = {
     "member": [
         "group:view",
@@ -229,8 +226,6 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         "updatedAt": timestamp,
         "counters": {
             "user": len(users),
-            "groupBuy": 5,
-            "groupBuyItem": 5,
             "groupBuyRecord": 5,
             "userAlias": 0,
             "fileObject": 0,
@@ -267,140 +262,6 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         ],
         "users": users,
         "userAliases": [],
-        "groupBuys": [
-            {
-                "id": "gb_1",
-                "groupId": "group_1",
-                "title": "月岛生日吧唧团",
-                "type": "群内开谷",
-                "status": "拼拼拼",
-                "description": "第一批主推拼团，含吧唧、色纸和拍立得。",
-                "closeAt": "2026-06-30T12:00:00+08:00",
-                "coverImageUrl": None,
-                "defaultChannel": "QQ 支付",
-                "defaultStockKeeper": "阿简",
-                "createdByUserId": "user_maintainer",
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gb_2",
-                "groupId": "group_1",
-                "title": "夏日拍立得补尾款",
-                "type": "补款",
-                "status": "等待开团",
-                "description": "尚未开始的补款拼团，用于测试未开始状态。",
-                "closeAt": "2026-07-02T18:00:00+08:00",
-                "coverImageUrl": None,
-                "defaultChannel": "QQ 支付",
-                "defaultStockKeeper": "阿简",
-                "createdByUserId": "user_maintainer",
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gb_3",
-                "groupId": "group_1",
-                "title": "夜航票夹加印",
-                "type": "现货加开",
-                "status": "已截团",
-                "description": "已经截团的票夹加印团。",
-                "closeAt": "2026-06-16T23:59:00+08:00",
-                "coverImageUrl": None,
-                "defaultChannel": "QQ 支付",
-                "defaultStockKeeper": "阿简",
-                "createdByUserId": "user_admin",
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gb_4",
-                "groupId": "group_1",
-                "title": "周年亚克力补寄",
-                "type": "补寄",
-                "status": "已完成",
-                "description": "已完成的补寄拼团样例。",
-                "closeAt": "2026-05-20T20:00:00+08:00",
-                "coverImageUrl": None,
-                "defaultChannel": "QQ 支付",
-                "defaultStockKeeper": "阿简",
-                "createdByUserId": "user_admin",
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gb_5",
-                "groupId": "group_2",
-                "title": "星砂透卡试运行",
-                "type": "群内开谷",
-                "status": "已取消",
-                "description": "预留给第二个谷团的取消状态示例。",
-                "closeAt": "2026-06-28T14:00:00+08:00",
-                "coverImageUrl": None,
-                "defaultChannel": "QQ 支付",
-                "defaultStockKeeper": "阿简",
-                "createdByUserId": "user_maintainer",
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-        ],
-        "groupBuyItems": [
-            {
-                "id": "gbi_1",
-                "groupBuyId": "gb_1",
-                "name": "月岛吧唧",
-                "characterName": "月岛萤",
-                "imageUrl": None,
-                "unitPriceCny": "35.00",
-                "totalQuantity": 20,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gbi_2",
-                "groupBuyId": "gb_1",
-                "name": "海报色纸",
-                "characterName": "影山飞雄",
-                "imageUrl": None,
-                "unitPriceCny": "28.00",
-                "totalQuantity": 16,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gbi_3",
-                "groupBuyId": "gb_1",
-                "name": "拍立得两连",
-                "characterName": "及川彻",
-                "imageUrl": None,
-                "unitPriceCny": "42.00",
-                "totalQuantity": 12,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gbi_4",
-                "groupBuyId": "gb_2",
-                "name": "夏日拍立得",
-                "characterName": "孤爪研磨",
-                "imageUrl": None,
-                "unitPriceCny": "18.00",
-                "totalQuantity": 40,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "gbi_5",
-                "groupBuyId": "gb_3",
-                "name": "夜航票夹",
-                "characterName": "赤苇京治",
-                "imageUrl": None,
-                "unitPriceCny": "25.00",
-                "totalQuantity": 15,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-        ],
         "groupBuyRecords": [
             {
                 "id": "record_1",
@@ -461,6 +322,21 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         "fileObjects": [],
         "auditLogs": [],
     }
+
+
+def remove_group_buy_management_state(state: dict[str, Any]) -> bool:
+    # 团购管理已迁移到 DB；这里只清理旧团购/商品 JSON，不动 groupBuyRecords。
+    changed = False
+    for key in ("groupBuys", "groupBuyItems"):
+        if key in state:
+            state.pop(key, None)
+            changed = True
+    counters = state.setdefault("counters", {})
+    for key in ("groupBuy", "groupBuyItem"):
+        if key in counters:
+            counters.pop(key, None)
+            changed = True
+    return changed
 
 
 class LegacyJsonRuntime:
@@ -530,7 +406,7 @@ class LegacyJsonRuntime:
             audit_log=self.audit_service.log,
             now_iso=utc_now_iso,
             assert_manage_permission=self.assert_order_logistics_permission,
-            get_group_buy_for_write=self.get_group_buy_for_write,
+            get_group_buy_for_write=self._database_group_buy_dependency_required,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
             require_active_file_object=self.file_service.require_active_file_object,
             mark_ordered=self.group_buy_records_module.mark_ordered,
@@ -570,6 +446,9 @@ class LegacyJsonRuntime:
     def _database_charge_dependency_required(self, *args, **kwargs):
         raise RuntimeError("Charge creation now requires the database-backed AppContext module.")
 
+    def _database_group_buy_dependency_required(self, *args, **kwargs):
+        raise RuntimeError("Group buy management now requires the database-backed AppContext module.")
+
     def create_audit_log(
         self,
         *,
@@ -608,17 +487,6 @@ class LegacyJsonRuntime:
 
     def get_group_by_id(self, group_id: str) -> dict[str, Any] | None:
         return next((group for group in self.state["groups"] if group["id"] == group_id), None)
-
-    def get_group_buy_by_id(self, group_buy_id: str) -> dict[str, Any] | None:
-        return next(
-            (group_buy for group_buy in self.state["groupBuys"] if group_buy["id"] == group_buy_id),
-            None,
-        )
-
-    def get_group_buy_items(self, group_buy_id: str) -> list[dict[str, Any]]:
-        return [
-            item for item in self.state["groupBuyItems"] if item["groupBuyId"] == group_buy_id
-        ]
 
     def get_my_records(self, group_buy_id: str, user_id: str) -> list[dict[str, Any]]:
         return self.group_buy_records_module.list_member_records(
@@ -678,22 +546,11 @@ class LegacyJsonRuntime:
     def assert_order_logistics_permission(self, actor_user_id: str) -> None:
         self.require_order_logistics_user(actor_user_id)
 
-    def get_group_buy_for_write(self, actor_user_id: str, group_buy_id: str) -> dict[str, Any]:
-        user = self.require_order_logistics_user(actor_user_id)
-        return self.require_visible_group_buy(user, group_buy_id)
-
     def require_visible_group(self, user: dict[str, Any], group_id: str) -> dict[str, Any]:
         group = self.get_group_by_id(group_id)
         if group is None or not self.can_view_group(user, group):
             raise AppError(404, "谷团不存在", "NOT_FOUND")
         return group
-
-    def require_visible_group_buy(self, user: dict[str, Any], group_buy_id: str) -> dict[str, Any]:
-        group_buy = self.get_group_buy_by_id(group_buy_id)
-        if group_buy is None:
-            raise AppError(404, "拼团不存在", "NOT_FOUND")
-        self.require_visible_group(user, group_buy["groupId"])
-        return group_buy
 
     def on_charge_confirmed(
         self,
@@ -713,7 +570,6 @@ class LegacyJsonRuntime:
             "ok": True,
             "groups": len(self.state["groups"]),
             "users": len(self.state["users"]),
-            "groupBuys": len(self.state["groupBuys"]),
             "fileObjects": len(self.state["fileObjects"]),
             "auditLogs": len(self.state["auditLogs"]),
             "orderScreenshots": len(self.state["orderScreenshots"]),
@@ -983,12 +839,7 @@ class LegacyJsonRuntime:
                     "name": group["name"],
                     "coverImageUrl": group["coverImageUrl"],
                     "memberCount": len(group["memberIds"]),
-                    "activeGroupBuyCount": sum(
-                        1
-                        for group_buy in self.state["groupBuys"]
-                        if group_buy["groupId"] == group["id"]
-                        and group_buy["status"] in ACTIVE_GROUP_BUY_STATUSES
-                    ),
+                    "activeGroupBuyCount": 0,
                     "myRoles": clone(user["roles"]),
                 }
             )
@@ -1018,12 +869,7 @@ class LegacyJsonRuntime:
                 "canCreateGroupBuy": has_permission(user, "group_buy:create"),
             },
             "summary": {
-                "activeGroupBuyCount": sum(
-                    1
-                    for group_buy in self.state["groupBuys"]
-                    if group_buy["groupId"] == group["id"]
-                    and group_buy["status"] in ACTIVE_GROUP_BUY_STATUSES
-                ),
+                "activeGroupBuyCount": 0,
                 "myPendingPaymentCount": 0,
                 "myDispatchableCount": self.group_buy_records_module.count_member_records_by_status(
                     member_user_id=user["id"],
@@ -1031,57 +877,6 @@ class LegacyJsonRuntime:
                 ),
             },
         }
-
-    def matches_status_filter(self, status_filter: str | None, status: str) -> bool:
-        if not status_filter or status_filter == "全部":
-            return True
-        if status_filter == "进行中":
-            return status in {"拼拼拼", "已切"}
-        if status_filter == "未开始":
-            return status == "等待开团"
-        return status_filter == status
-
-    def build_group_buys(
-        self,
-        group_id: str,
-        user: dict[str, Any],
-        filters: dict[str, str | None],
-    ) -> dict[str, Any]:
-        self.require_visible_group(user, group_id)
-        keyword = (filters.get("keyword") or "").strip().lower()
-        items = []
-
-        for group_buy in self.state["groupBuys"]:
-            if group_buy["groupId"] != group_id:
-                continue
-            if not self.matches_status_filter(filters.get("status"), group_buy["status"]):
-                continue
-            if keyword and keyword not in group_buy["title"].lower() and keyword not in group_buy["type"].lower():
-                continue
-
-            items_in_buy = self.get_group_buy_items(group_buy["id"])
-            my_record_count = sum(
-                record["quantity"] for record in self.get_my_records(group_buy["id"], user["id"])
-            )
-
-            items.append(
-                {
-                    "id": group_buy["id"],
-                    "title": group_buy["title"],
-                    "type": group_buy["type"],
-                    "status": group_buy["status"],
-                    "closeAt": group_buy["closeAt"],
-                    "itemCount": len(items_in_buy),
-                    "availableQuantity": sum(
-                        item["totalQuantity"] - self.get_claimed_quantity(item["id"])
-                        for item in items_in_buy
-                    ),
-                    "myRecordCount": my_record_count,
-                    "coverImageUrl": group_buy["coverImageUrl"],
-                }
-            )
-
-        return {"items": items, "total": len(items)}
 
     def build_admin_capabilities(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
         self.require_visible_group(user, group_id)
@@ -1130,57 +925,6 @@ class LegacyJsonRuntime:
                     "enabled": has_role(user, "admin"),
                 },
             ]
-        }
-
-    def build_group_buy_detail(self, group_buy_id: str, user: dict[str, Any]) -> dict[str, Any]:
-        group_buy = self.require_visible_group_buy(user, group_buy_id)
-        items = []
-
-        for item in self.get_group_buy_items(group_buy_id):
-            claimed_quantity = self.get_claimed_quantity(item["id"])
-            available_quantity = item["totalQuantity"] - claimed_quantity
-            items.append(
-                {
-                    "id": item["id"],
-                    "name": item["name"],
-                    "characterName": item["characterName"],
-                    "imageUrl": item["imageUrl"],
-                    "unitPriceCny": item["unitPriceCny"],
-                    "totalQuantity": item["totalQuantity"],
-                    "claimedQuantity": claimed_quantity,
-                    "availableQuantity": available_quantity,
-                    "status": "可拼" if available_quantity > 0 else "已满",
-                }
-            )
-
-        return {
-            "groupBuy": {
-                "id": group_buy["id"],
-                "groupId": group_buy["groupId"],
-                "title": group_buy["title"],
-                "type": group_buy["type"],
-                "status": group_buy["status"],
-                "description": group_buy["description"],
-                "closeAt": group_buy["closeAt"],
-            },
-            "items": items,
-            "myRecords": [
-                {
-                    "id": record["id"],
-                    "groupBuyItemId": record["groupBuyItemId"],
-                    "quantity": record["quantity"],
-                    "displayStatus": record["displayStatus"],
-                    "isException": record["isException"],
-                }
-                for record in self.get_my_records(group_buy_id, user["id"])
-            ],
-            "capabilities": {
-                "canClaim": has_permission(user, "record:create_self")
-                and group_buy["status"] in CLAIMABLE_GROUP_BUY_STATUSES,
-                "canEdit": has_role(user, ["group_buy_maintainer", "admin"]),
-                "canUploadOrderScreenshot": has_role(user, ["group_buy_maintainer", "admin"]),
-                "canManageRecords": has_role(user, ["group_buy_maintainer", "admin"]),
-            },
         }
 
     def register_user(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1321,50 +1065,6 @@ class LegacyJsonRuntime:
         self.persist()
         return {"ok": True}
 
-    def create_group_buy(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        if not has_permission(user, "group_buy:create"):
-            raise AppError(403, "当前账号没有创建拼团的权限", "FORBIDDEN")
-
-        group_id = normalize_text(payload.get("groupId"), "所属谷团")
-        self.require_visible_group(user, group_id)
-
-        next_group_buy = {
-            "id": self.next_id("groupBuy", "gb"),
-            "groupId": group_id,
-            "title": normalize_text(payload.get("title"), "拼团标题", 2),
-            "type": normalize_text(payload.get("type"), "拼团类型"),
-            "status": "等待开团",
-            "description": normalize_text(payload.get("description"), "拼团说明", 4),
-            "closeAt": normalize_text(payload.get("closeAt"), "截团时间"),
-            "coverImageUrl": None,
-            "defaultChannel": normalize_text(payload.get("defaultChannel"), "默认收款渠道"),
-            "defaultStockKeeper": normalize_text(payload.get("defaultStockKeeper"), "默认囤货人"),
-            "createdByUserId": user["id"],
-            "createdAt": utc_now_iso(),
-            "updatedAt": utc_now_iso(),
-        }
-        self.state["groupBuys"].insert(0, next_group_buy)
-
-        self.audit_service.log(
-            actor_user_id=user["id"],
-            action="group_buy.create",
-            object_type="group_buy",
-            object_id=next_group_buy["id"],
-            before=None,
-            after=next_group_buy,
-            reason="前端新建拼团",
-        )
-        self.persist()
-        return {"groupBuyId": next_group_buy["id"]}
-
-    def claim_group_buy_item(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.group_buy_records_module.create_record(user, payload)
-        self.persist()
-        return {
-            "recordId": result["recordId"],
-            "displayStatus": result["displayStatus"],
-        }
-
 
 def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
     data_file: Path = config.data_file
@@ -1382,6 +1082,8 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
             encoding="utf-8",
         )
 
+    if remove_group_buy_management_state(state):
+        needs_persist = True
     if ensure_file_audit_state(state):
         needs_persist = True
     if ensure_group_buy_record_state(state):

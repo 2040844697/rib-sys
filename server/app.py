@@ -248,6 +248,69 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            match = re.fullmatch(r"/api/group-buys/([^/]+)", path)
+            if self.command == "PATCH" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.update_group_buy(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/group-buys/([^/]+)/status", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.change_group_buy_status(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/group-buy-items":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.create_group_buy_item(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            match = re.fullmatch(r"/api/group-buy-items/([^/]+)", path)
+            if self.command == "PATCH" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.update_group_buy_item(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/group-buy-items/release-stock":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.release_group_buy_item_stock(
+                        self._require_user(),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/price-adjustments":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.request_price_adjustment(
+                        self._require_user(),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
             if self.command == "POST" and path == "/api/order-screenshots":
                 self._write_json(
                     HTTPStatus.OK,
