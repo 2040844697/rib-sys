@@ -392,6 +392,9 @@ CREATE TABLE IF NOT EXISTS international_fee_allocations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE international_fee_allocations
+  ADD COLUMN IF NOT EXISTS charge_id TEXT REFERENCES charges(id);
+
 CREATE TABLE IF NOT EXISTS stock_items (
   id TEXT PRIMARY KEY,
   warehouse_user_id TEXT NOT NULL REFERENCES users(id),

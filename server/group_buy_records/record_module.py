@@ -623,16 +623,67 @@ class GroupBuyRecordsModule:
         reason = _normalize_required_text(payload.get("reason"), "reason", 2)
         return self._recalculate_many(record_ids, actor_user_id=actor_user_id, reason=reason, action="record.mark_ordered")
 
+    def mark_ordered_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给订单物流模块在同一事务里触发下单状态重算。
+        return self._recalculate_many_in_connection(
+            conn,
+            record_ids,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            action="record.mark_ordered",
+        )
+
     def mark_stocked(self, payload: dict[str, Any], *, actor_user_id: str | None = None) -> dict[str, Any]:
         # 入库事实由 stock_items 提供，这里只触发状态重算。
         record_ids = self._normalize_record_id_list(payload.get("groupBuyRecordIds"))
         return self._recalculate_many(record_ids, actor_user_id=actor_user_id, reason="国内囤货入库", action="record.mark_stocked")
+
+    def mark_stocked_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给仓库/订单物流在同一事务里触发入库状态重算。
+        return self._recalculate_many_in_connection(
+            conn,
+            record_ids,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            action="record.mark_stocked",
+        )
 
     def enter_transfer_flow(self, payload: dict[str, Any], *, actor_user_id: str | None = None) -> dict[str, Any]:
         # 转运流程事实由国际批次关联提供，这里只触发状态重算。
         record_ids = self._normalize_record_id_list(payload.get("groupBuyRecordIds"))
         reason = _normalize_required_text(payload.get("reason"), "reason", 2)
         return self._recalculate_many(record_ids, actor_user_id=actor_user_id, reason=reason, action="record.enter_transfer_flow")
+
+    def enter_transfer_flow_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        # 给订单物流模块在同一事务里触发转运状态重算。
+        return self._recalculate_many_in_connection(
+            conn,
+            record_ids,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            action="record.enter_transfer_flow",
+        )
 
     def mark_dispatch_requested(self, payload: dict[str, Any], *, actor_user_id: str | None = None) -> dict[str, Any]:
         # 排发申请 ID 是主表关键外键，写入后重算状态。
@@ -1124,6 +1175,27 @@ class GroupBuyRecordsModule:
 
     def _recalculate_many(self, record_ids: list[str], *, actor_user_id: str | None, reason: str, action: str) -> dict[str, Any]:
         # 批量重算记录状态并写审计日志。
+        with connect(self.config) as conn:
+            result = self._recalculate_many_in_connection(
+                conn,
+                record_ids,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                action=action,
+            )
+            conn.commit()
+        return result
+
+    def _recalculate_many_in_connection(
+        self,
+        conn,
+        record_ids: list[str],
+        *,
+        actor_user_id: str | None,
+        reason: str,
+        action: str,
+    ) -> dict[str, Any]:
+        # 在调用方事务内批量重算记录状态并写审计日志。
         fact_overrides_by_action = {
             "record.mark_ordered": {"isOrdered": True},
             "record.enter_transfer_flow": {"hasInternationalBatch": True},
@@ -1133,29 +1205,27 @@ class GroupBuyRecordsModule:
         }
         fact_overrides = fact_overrides_by_action.get(action)
         updated_count = 0
-        with connect(self.config) as conn:
-            for record_id in record_ids:
-                before = self._require_record_in_connection(conn, record_id, lock=True)
-                after = self._recalculate_record_status_in_connection(
-                    conn,
-                    record_id,
-                    actor_user_id=actor_user_id,
-                    reason=reason,
-                    write_audit=False,
-                    fact_overrides=fact_overrides,
-                )
-                self._audit(
-                    conn,
-                    actor_user_id=actor_user_id,
-                    action=action,
-                    object_type="group_buy_record",
-                    object_id=record_id,
-                    before=before,
-                    after=after,
-                    reason=reason,
-                )
-                updated_count += 1
-            conn.commit()
+        for record_id in record_ids:
+            before = self._require_record_in_connection(conn, record_id, lock=True)
+            after = self._recalculate_record_status_in_connection(
+                conn,
+                record_id,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                write_audit=False,
+                fact_overrides=fact_overrides,
+            )
+            self._audit(
+                conn,
+                actor_user_id=actor_user_id,
+                action=action,
+                object_type="group_buy_record",
+                object_id=record_id,
+                before=before,
+                after=after,
+                reason=reason,
+            )
+            updated_count += 1
         return {"updatedCount": updated_count}
 
     def _build_record_summary_in_connection(self, conn, record: dict[str, Any]) -> dict[str, Any]:

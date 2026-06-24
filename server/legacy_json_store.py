@@ -11,7 +11,6 @@ from typing import Any
 from .config import Config
 from .errors import AppError
 from .file_audit import AuditService, FileService, ensure_file_audit_state
-from .order_logistics import OrderLogisticsModule, ensure_order_logistics_state
 from .transfer_exception import TransferExceptionModule, ensure_transfer_exception_state
 from .warehouse_dispatch import WarehouseDispatchModule, ensure_warehouse_dispatch_state
 
@@ -280,6 +279,31 @@ def remove_group_buy_management_state(state: dict[str, Any]) -> bool:
     return changed
 
 
+def remove_order_logistics_state(state: dict[str, Any]) -> bool:
+    # 订单物流已迁移到 DB；这里只清理旧下单和国际批次 JSON。
+    changed = False
+    for key in (
+        "orderScreenshots",
+        "internationalBatches",
+        "internationalBatchRecords",
+        "internationalFeeAllocations",
+    ):
+        if key in state:
+            state.pop(key, None)
+            changed = True
+    counters = state.setdefault("counters", {})
+    for key in (
+        "orderScreenshot",
+        "internationalBatch",
+        "internationalBatchRecord",
+        "internationalFeeAllocation",
+    ):
+        if key in counters:
+            counters.pop(key, None)
+            changed = True
+    return changed
+
+
 class LegacyJsonRuntime:
     def __init__(self, config: Config, state: dict[str, Any], created_fresh_data: bool):
         self.config = config
@@ -287,7 +311,7 @@ class LegacyJsonRuntime:
         self.created_fresh_data = created_fresh_data
         self.sessions: dict[str, dict[str, Any]] = {}
         ensure_file_audit_state(self.state)
-        ensure_order_logistics_state(self.state)
+        remove_order_logistics_state(self.state)
         ensure_transfer_exception_state(self.state)
         ensure_warehouse_dispatch_state(self.state)
         self.audit_service = AuditService(
@@ -331,21 +355,6 @@ class LegacyJsonRuntime:
             mark_completed=self._database_group_buy_record_dependency_required,
             link_charge=self._database_group_buy_record_dependency_required,
             create_charge=self._database_charge_dependency_required,
-        )
-        self.order_logistics_module = OrderLogisticsModule(
-            state=self.state,
-            next_id=self.next_id,
-            audit_log=self.audit_service.log,
-            now_iso=utc_now_iso,
-            assert_manage_permission=self.assert_order_logistics_permission,
-            get_group_buy_for_write=self._database_group_buy_dependency_required,
-            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            require_active_file_object=self.file_service.require_active_file_object,
-            mark_ordered=self._database_group_buy_record_dependency_required,
-            enter_transfer_flow=self._database_group_buy_record_dependency_required,
-            link_charge=self._database_group_buy_record_dependency_required,
-            create_charge=self._database_charge_dependency_required,
-            stock_in_batch=self.warehouse_dispatch_module.stock_in_international_batch,
         )
 
     @property
@@ -498,10 +507,6 @@ class LegacyJsonRuntime:
             "users": len(self.state["users"]),
             "fileObjects": len(self.state["fileObjects"]),
             "auditLogs": len(self.state["auditLogs"]),
-            "orderScreenshots": len(self.state["orderScreenshots"]),
-            "internationalBatches": len(self.state["internationalBatches"]),
-            "internationalBatchRecords": len(self.state["internationalBatchRecords"]),
-            "internationalFeeAllocations": len(self.state["internationalFeeAllocations"]),
             "stockItems": len(self.state["stockItems"]),
             "dispatchRequests": len(self.state["dispatchRequests"]),
             "dispatchItems": len(self.state["dispatchItems"]),
@@ -562,75 +567,6 @@ class LegacyJsonRuntime:
 
     def list_audit_logs(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
         return self.audit_service.list_logs(user, filters)
-
-    def add_order_screenshot(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.order_logistics_module.add_order_screenshot(user["id"], payload)
-        self.persist()
-        return result
-
-    def mark_records_ordered(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.order_logistics_module.mark_records_ordered(user["id"], payload)
-        self.persist()
-        return result
-
-    def create_international_batch(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.order_logistics_module.create_international_batch(user["id"], payload)
-        self.persist()
-        return result
-
-    def add_records_to_international_batch(
-        self,
-        user: dict[str, Any],
-        batch_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.order_logistics_module.add_records_to_batch(user["id"], batch_id, payload)
-        self.persist()
-        return result
-
-    def update_international_batch_shipping(
-        self,
-        user: dict[str, Any],
-        batch_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.order_logistics_module.update_batch_shipping(user["id"], batch_id, payload)
-        self.persist()
-        return result
-
-    def record_international_batch_arrived_domestic(
-        self,
-        user: dict[str, Any],
-        batch_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.order_logistics_module.record_batch_arrived_domestic(user["id"], batch_id, payload)
-        self.persist()
-        return result
-
-    def stock_in_international_batch(
-        self,
-        user: dict[str, Any],
-        batch_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.warehouse_dispatch_module.stock_in_international_batch(
-            batch_id,
-            payload,
-            actor_user_id=user["id"],
-        )
-        self.persist()
-        return result
-
-    def record_international_batch_fees(
-        self,
-        user: dict[str, Any],
-        batch_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = self.order_logistics_module.record_batch_fees(user["id"], batch_id, payload)
-        self.persist()
-        return result
 
     def request_transfer(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         result = self.transfer_exception_module.request_transfer(user, payload)
@@ -1009,7 +945,7 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
         needs_persist = True
     if ensure_file_audit_state(state):
         needs_persist = True
-    if ensure_order_logistics_state(state):
+    if remove_order_logistics_state(state):
         needs_persist = True
     if ensure_transfer_exception_state(state):
         needs_persist = True
