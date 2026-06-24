@@ -1,3 +1,4 @@
-from .goods_catalog_module import GoodsCatalogModule, ensure_goods_catalog_state
+from .goods_catalog_module import GoodsCatalogModule
+from .goods_catalog_repo import GoodsCatalogRepository
 
-__all__ = ["GoodsCatalogModule", "ensure_goods_catalog_state"]
+__all__ = ["GoodsCatalogModule", "GoodsCatalogRepository"]
