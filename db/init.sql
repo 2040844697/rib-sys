@@ -302,11 +302,19 @@ CREATE TABLE IF NOT EXISTS group_buy_records (
   exception_reason TEXT,
   status_priority INTEGER,
   note TEXT,
+  source TEXT NOT NULL DEFAULT 'member_claim',
+  source_record_id TEXT REFERENCES group_buy_records(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (group_buy_item_id, member_user_id),
   CHECK (quantity > 0)
 );
+
+ALTER TABLE group_buy_records
+  ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'member_claim';
+
+ALTER TABLE group_buy_records
+  ADD COLUMN IF NOT EXISTS source_record_id TEXT REFERENCES group_buy_records(id);
 
 CREATE INDEX IF NOT EXISTS idx_group_buy_records_group_buy_id ON group_buy_records(group_buy_id);
 CREATE INDEX IF NOT EXISTS idx_group_buy_records_member_user_id ON group_buy_records(member_user_id);

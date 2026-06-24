@@ -222,6 +222,7 @@ class GroupBuyModule:
         self.has_permission = has_permission
         self.audit_service = audit_service
         self.create_charge_from_related_module = create_charge_from_related_module
+        self.group_buy_records_module = None
 
     def _assert_database_enabled(self) -> None:
         if not self.config.database_url:
@@ -456,11 +457,17 @@ class GroupBuyModule:
             group_buy = self._require_group_buy(conn, group_buy_id)
             self._require_group_access(actor_user_id, group_buy["groupId"])
             items = self.repo.list_group_buy_items(conn, group_buy_id)
-            my_records = self.repo.list_member_records(
-                conn,
-                group_buy_id=group_buy_id,
-                member_user_id=actor_user_id,
-            )
+            if self.group_buy_records_module is None:
+                my_records = self.repo.list_member_records(
+                    conn,
+                    group_buy_id=group_buy_id,
+                    member_user_id=actor_user_id,
+                )
+            else:
+                my_records = self.group_buy_records_module.list_member_records(
+                    group_buy_id=group_buy_id,
+                    member_user_id=actor_user_id,
+                )
             conn.rollback()
 
         return {
@@ -963,6 +970,10 @@ class GroupBuyModule:
         actor_user_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # 认领记录主流程迁移到 group_buy_records 模块，避免重复维护记录状态逻辑。
+        if self.group_buy_records_module is not None:
+            return self.group_buy_records_module.create_record_for_user(actor_user_id, payload)
+
         self._assert_database_enabled()
         group_buy_item_id = _normalize_required_text(
             payload.get("groupBuyItemId")

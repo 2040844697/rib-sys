@@ -136,6 +136,7 @@ class ChargePaymentModule:
         has_permission_by_user_id: Callable[[str, str], bool],
         get_user_snapshot_by_id: Callable[[str], dict[str, Any] | None],
         on_charge_confirmed: Callable[..., dict[str, Any]] | None = None,
+        group_buy_records_module: Any | None = None,
     ):
         self.config = config
         self.repository = repository
@@ -144,6 +145,7 @@ class ChargePaymentModule:
         self.has_permission_by_user_id = has_permission_by_user_id
         self.get_user_snapshot_by_id = get_user_snapshot_by_id
         self.on_charge_confirmed = on_charge_confirmed
+        self.group_buy_records_module = group_buy_records_module
 
     def count_pending_charges_for_user(self, payer_user_id: str) -> int:
         with connect(self.config) as conn:
@@ -589,14 +591,30 @@ class ChargePaymentModule:
 
                 payment_type = CHARGE_TYPE_TO_PAYMENT_TYPE.get(charge["type"])
                 if payment_type is not None:
-                    record_ids = self.repository.list_group_buy_record_ids_by_charge(conn, charge["id"])
-                    for record_id in record_ids:
-                        record_before, record_after = self.repository.link_group_buy_record_payment_proof(
+                    if self.group_buy_records_module is not None:
+                        record_ids = self.group_buy_records_module.list_group_buy_record_ids_by_charge_in_connection(
                             conn,
-                            group_buy_record_id=record_id,
-                            payment_type=payment_type,
-                            payment_proof_id=proof_id,
+                            charge["id"],
                         )
+                    else:
+                        record_ids = self.repository.list_group_buy_record_ids_by_charge(conn, charge["id"])
+                    for record_id in record_ids:
+                        if self.group_buy_records_module is not None:
+                            record_before, record_after = self.group_buy_records_module.link_payment_proof_in_connection(
+                                conn,
+                                group_buy_record_id=record_id,
+                                payment_type=payment_type,
+                                payment_proof_id=proof_id,
+                                actor_user_id=actor_user_id,
+                                reason=f"link {payment_type} payment proof",
+                            )
+                        else:
+                            record_before, record_after = self.repository.link_group_buy_record_payment_proof(
+                                conn,
+                                group_buy_record_id=record_id,
+                                payment_type=payment_type,
+                                payment_proof_id=proof_id,
+                            )
                         linked_record_ids.add(record_id)
                         self.audit_service.log_in_connection(
                             conn,

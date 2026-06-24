@@ -11,7 +11,6 @@ from typing import Any
 from .config import Config
 from .errors import AppError
 from .file_audit import AuditService, FileService, ensure_file_audit_state
-from .group_buy_records import GroupBuyRecordsModule, ensure_group_buy_record_state
 from .order_logistics import OrderLogisticsModule, ensure_order_logistics_state
 from .transfer_exception import TransferExceptionModule, ensure_transfer_exception_state
 from .warehouse_dispatch import WarehouseDispatchModule, ensure_warehouse_dispatch_state
@@ -226,7 +225,6 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         "updatedAt": timestamp,
         "counters": {
             "user": len(users),
-            "groupBuyRecord": 5,
             "userAlias": 0,
             "fileObject": 0,
             "auditLog": 0,
@@ -262,70 +260,13 @@ def create_initial_data(config: Config) -> dict[str, Any]:
         ],
         "users": users,
         "userAliases": [],
-        "groupBuyRecords": [
-            {
-                "id": "record_1",
-                "memberUserId": "user_member",
-                "groupBuyId": "gb_1",
-                "groupBuyItemId": "gbi_1",
-                "quantity": 1,
-                "status": "未肾",
-                "isException": False,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "record_2",
-                "memberUserId": "user_maintainer",
-                "groupBuyId": "gb_1",
-                "groupBuyItemId": "gbi_2",
-                "quantity": 2,
-                "status": "未补国际",
-                "isException": False,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "record_3",
-                "memberUserId": "user_guest_a",
-                "groupBuyId": "gb_1",
-                "groupBuyItemId": "gbi_1",
-                "quantity": 5,
-                "status": "未到货",
-                "isException": False,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "record_4",
-                "memberUserId": "user_guest_b",
-                "groupBuyId": "gb_1",
-                "groupBuyItemId": "gbi_3",
-                "quantity": 4,
-                "status": "可排发",
-                "isException": False,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-            {
-                "id": "record_5",
-                "memberUserId": "user_stock",
-                "groupBuyId": "gb_3",
-                "groupBuyItemId": "gbi_5",
-                "quantity": 1,
-                "status": "已申请排发",
-                "isException": False,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-            },
-        ],
         "fileObjects": [],
         "auditLogs": [],
     }
 
 
 def remove_group_buy_management_state(state: dict[str, Any]) -> bool:
-    # 团购管理已迁移到 DB；这里只清理旧团购/商品 JSON，不动 groupBuyRecords。
+    # 团购管理已迁移到 DB；这里只清理旧团购/商品 JSON。
     changed = False
     for key in ("groupBuys", "groupBuyItems"):
         if key in state:
@@ -346,7 +287,6 @@ class LegacyJsonRuntime:
         self.created_fresh_data = created_fresh_data
         self.sessions: dict[str, dict[str, Any]] = {}
         ensure_file_audit_state(self.state)
-        ensure_group_buy_record_state(self.state)
         ensure_order_logistics_state(self.state)
         ensure_transfer_exception_state(self.state)
         ensure_warehouse_dispatch_state(self.state)
@@ -364,14 +304,6 @@ class LegacyJsonRuntime:
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
             now_iso=utc_now_iso,
         )
-        self.group_buy_records_module = GroupBuyRecordsModule(
-            state=self.state,
-            next_id=self.next_id,
-            audit_log=self.audit_service.log,
-            now_iso=utc_now_iso,
-            has_permission=has_permission,
-            can_view_group_buy=self.can_view_group_buy,
-        )
         self.transfer_exception_module = TransferExceptionModule(
             state=self.state,
             next_id=self.next_id,
@@ -379,9 +311,9 @@ class LegacyJsonRuntime:
             now_iso=utc_now_iso,
             has_permission_by_user_id=self.has_permission_by_user_id,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            require_group_buy_record=self.group_buy_records_module.require_record,
-            refresh_record_status=self.group_buy_records_module.refresh_record_status,
-            create_record_for_transfer=self.group_buy_records_module.create_transfer_record,
+            require_group_buy_record=self._database_group_buy_record_dependency_required,
+            refresh_record_status=self._database_group_buy_record_dependency_required,
+            create_record_for_transfer=self._database_group_buy_record_dependency_required,
             create_charge_adjustment=self._database_charge_dependency_required,
         )
         self.warehouse_dispatch_module = WarehouseDispatchModule(
@@ -391,13 +323,13 @@ class LegacyJsonRuntime:
             now_iso=utc_now_iso,
             has_permission_by_user_id=self.has_permission_by_user_id,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            require_group_buy_record=self.group_buy_records_module.require_record,
-            build_group_buy_record_summary=self.group_buy_records_module.build_record_summary,
-            mark_stocked=self.group_buy_records_module.mark_stocked,
-            mark_dispatch_requested=self.group_buy_records_module.mark_dispatch_requested,
-            mark_dispatched=self.group_buy_records_module.mark_dispatched,
-            mark_completed=self.group_buy_records_module.mark_completed,
-            link_charge=self.group_buy_records_module.link_charge,
+            require_group_buy_record=self._database_group_buy_record_dependency_required,
+            build_group_buy_record_summary=self._database_group_buy_record_dependency_required,
+            mark_stocked=self._database_group_buy_record_dependency_required,
+            mark_dispatch_requested=self._database_group_buy_record_dependency_required,
+            mark_dispatched=self._database_group_buy_record_dependency_required,
+            mark_completed=self._database_group_buy_record_dependency_required,
+            link_charge=self._database_group_buy_record_dependency_required,
             create_charge=self._database_charge_dependency_required,
         )
         self.order_logistics_module = OrderLogisticsModule(
@@ -409,9 +341,9 @@ class LegacyJsonRuntime:
             get_group_buy_for_write=self._database_group_buy_dependency_required,
             get_user_snapshot_by_id=self.get_user_snapshot_by_id,
             require_active_file_object=self.file_service.require_active_file_object,
-            mark_ordered=self.group_buy_records_module.mark_ordered,
-            enter_transfer_flow=self.group_buy_records_module.enter_transfer_flow,
-            link_charge=self.group_buy_records_module.link_charge,
+            mark_ordered=self._database_group_buy_record_dependency_required,
+            enter_transfer_flow=self._database_group_buy_record_dependency_required,
+            link_charge=self._database_group_buy_record_dependency_required,
             create_charge=self._database_charge_dependency_required,
             stock_in_batch=self.warehouse_dispatch_module.stock_in_international_batch,
         )
@@ -448,6 +380,9 @@ class LegacyJsonRuntime:
 
     def _database_group_buy_dependency_required(self, *args, **kwargs):
         raise RuntimeError("Group buy management now requires the database-backed AppContext module.")
+
+    def _database_group_buy_record_dependency_required(self, *args, **kwargs):
+        raise RuntimeError("Group buy records now requires the database-backed AppContext module.")
 
     def create_audit_log(
         self,
@@ -487,15 +422,6 @@ class LegacyJsonRuntime:
 
     def get_group_by_id(self, group_id: str) -> dict[str, Any] | None:
         return next((group for group in self.state["groups"] if group["id"] == group_id), None)
-
-    def get_my_records(self, group_buy_id: str, user_id: str) -> list[dict[str, Any]]:
-        return self.group_buy_records_module.list_member_records(
-            group_buy_id=group_buy_id,
-            member_user_id=user_id,
-        )
-
-    def get_claimed_quantity(self, group_buy_item_id: str) -> int:
-        return self.group_buy_records_module.get_claimed_quantity(group_buy_item_id)
 
     def get_user_snapshot(self, user: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -871,10 +797,7 @@ class LegacyJsonRuntime:
             "summary": {
                 "activeGroupBuyCount": 0,
                 "myPendingPaymentCount": 0,
-                "myDispatchableCount": self.group_buy_records_module.count_member_records_by_status(
-                    member_user_id=user["id"],
-                    status="可排发",
-                ),
+                "myDispatchableCount": 0,
             },
         }
 
@@ -1085,8 +1008,6 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
     if remove_group_buy_management_state(state):
         needs_persist = True
     if ensure_file_audit_state(state):
-        needs_persist = True
-    if ensure_group_buy_record_state(state):
         needs_persist = True
     if ensure_order_logistics_state(state):
         needs_persist = True
