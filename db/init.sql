@@ -161,6 +161,13 @@ CREATE TABLE IF NOT EXISTS payment_channels (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE payment_channels
+  ALTER COLUMN status SET DEFAULT 'active';
+
+UPDATE payment_channels
+SET status = 'active'
+WHERE status = 'enabled';
+
 CREATE INDEX IF NOT EXISTS idx_payment_channels_owner_user_id ON payment_channels(owner_user_id);
 
 CREATE TABLE IF NOT EXISTS group_buys (
@@ -253,6 +260,18 @@ CREATE TABLE IF NOT EXISTS payment_proofs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_proofs_submitted_by ON payment_proofs(submitted_by);
+
+ALTER TABLE payment_proofs
+  ADD COLUMN IF NOT EXISTS review_note TEXT;
+
+ALTER TABLE charges
+  ADD COLUMN IF NOT EXISTS submitted_proof_id TEXT REFERENCES payment_proofs(id);
+
+ALTER TABLE charges
+  ADD COLUMN IF NOT EXISTS confirmed_proof_id TEXT REFERENCES payment_proofs(id);
+
+ALTER TABLE charges
+  ADD COLUMN IF NOT EXISTS cancelled_reason TEXT;
 
 CREATE TABLE IF NOT EXISTS payment_proof_allocations (
   id TEXT PRIMARY KEY,

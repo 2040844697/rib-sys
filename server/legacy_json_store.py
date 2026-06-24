@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .charge_payment import ChargePaymentModule, ensure_charge_payment_state
 from .errors import AppError
 from .file_audit import AuditService, FileService, ensure_file_audit_state
 from .group_buy_records import GroupBuyRecordsModule, ensure_group_buy_record_state
@@ -473,7 +472,6 @@ class LegacyJsonRuntime:
         ensure_file_audit_state(self.state)
         ensure_group_buy_record_state(self.state)
         ensure_order_logistics_state(self.state)
-        ensure_charge_payment_state(self.state)
         ensure_transfer_exception_state(self.state)
         ensure_warehouse_dispatch_state(self.state)
         self.audit_service = AuditService(
@@ -498,20 +496,6 @@ class LegacyJsonRuntime:
             has_permission=has_permission,
             can_view_group_buy=self.can_view_group_buy,
         )
-        self.charge_payment_module = ChargePaymentModule(
-            state=self.state,
-            next_id=self.next_id,
-            audit_log=self.audit_service.log,
-            now_iso=utc_now_iso,
-            has_permission_by_user_id=self.has_permission_by_user_id,
-            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            list_group_buy_record_ids_by_charge=self.group_buy_records_module.list_group_buy_record_ids_by_charge,
-            link_payment_proof=self.group_buy_records_module.link_payment_proof,
-            recalculate_display_status=self.group_buy_records_module.recalculate_display_status,
-            on_charge_confirmed=self.on_charge_confirmed,
-            require_active_file_object=self.file_service.require_active_file_object,
-        )
-        self.group_buy_records_module.create_charge = self.charge_payment_module.create_charge_from_related_module
         self.transfer_exception_module = TransferExceptionModule(
             state=self.state,
             next_id=self.next_id,
@@ -522,7 +506,7 @@ class LegacyJsonRuntime:
             require_group_buy_record=self.group_buy_records_module.require_record,
             refresh_record_status=self.group_buy_records_module.refresh_record_status,
             create_record_for_transfer=self.group_buy_records_module.create_transfer_record,
-            create_charge_adjustment=self.charge_payment_module.create_charge_adjustment,
+            create_charge_adjustment=self._database_charge_dependency_required,
         )
         self.warehouse_dispatch_module = WarehouseDispatchModule(
             state=self.state,
@@ -538,7 +522,7 @@ class LegacyJsonRuntime:
             mark_dispatched=self.group_buy_records_module.mark_dispatched,
             mark_completed=self.group_buy_records_module.mark_completed,
             link_charge=self.group_buy_records_module.link_charge,
-            create_charge=self.charge_payment_module.create_charge_from_related_module,
+            create_charge=self._database_charge_dependency_required,
         )
         self.order_logistics_module = OrderLogisticsModule(
             state=self.state,
@@ -552,7 +536,7 @@ class LegacyJsonRuntime:
             mark_ordered=self.group_buy_records_module.mark_ordered,
             enter_transfer_flow=self.group_buy_records_module.enter_transfer_flow,
             link_charge=self.group_buy_records_module.link_charge,
-            create_charge=self.charge_payment_module.create_charge_from_related_module,
+            create_charge=self._database_charge_dependency_required,
             stock_in_batch=self.warehouse_dispatch_module.stock_in_international_batch,
         )
 
@@ -582,6 +566,9 @@ class LegacyJsonRuntime:
     def next_id(self, counter_key: str, prefix: str) -> str:
         self.state["counters"][counter_key] += 1
         return f"{prefix}_{self.state['counters'][counter_key]}"
+
+    def _database_charge_dependency_required(self, *args, **kwargs):
+        raise RuntimeError("Charge creation now requires the database-backed AppContext module.")
 
     def create_audit_log(
         self,
@@ -733,11 +720,6 @@ class LegacyJsonRuntime:
             "internationalBatches": len(self.state["internationalBatches"]),
             "internationalBatchRecords": len(self.state["internationalBatchRecords"]),
             "internationalFeeAllocations": len(self.state["internationalFeeAllocations"]),
-            "charges": len(self.state["charges"]),
-            "paymentChannels": len(self.state["paymentChannels"]),
-            "paymentProofs": len(self.state["paymentProofs"]),
-            "paymentProofAllocations": len(self.state["paymentProofAllocations"]),
-            "chargeAdjustments": len(self.state["chargeAdjustments"]),
             "stockItems": len(self.state["stockItems"]),
             "dispatchRequests": len(self.state["dispatchRequests"]),
             "dispatchItems": len(self.state["dispatchItems"]),
@@ -865,47 +847,6 @@ class LegacyJsonRuntime:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         result = self.order_logistics_module.record_batch_fees(user["id"], batch_id, payload)
-        self.persist()
-        return result
-
-    def create_payment_channel(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.charge_payment_module.create_payment_channel(user["id"], payload)
-        self.persist()
-        return result
-
-    def create_charge(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        if not has_permission(user, "charge:adjust"):
-            raise AppError(403, "当前账号没有创建费用的权限", "FORBIDDEN")
-        result = self.charge_payment_module.create_charge(payload, actor_user_id=user["id"])
-        self.persist()
-        return result
-
-    def cancel_charge(self, user: dict[str, Any], charge_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.charge_payment_module.cancel_charge(user["id"], charge_id, payload)
-        self.persist()
-        return result
-
-    def submit_payment_proof(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        payload = {
-            **payload,
-            "submittedBy": payload.get("submittedBy") or user["id"],
-        }
-        result = self.charge_payment_module.submit_payment_proof(payload)
-        self.persist()
-        return result
-
-    def confirm_payment_proof(self, user: dict[str, Any], proof_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.charge_payment_module.confirm_payment_proof(user["id"], proof_id, payload)
-        self.persist()
-        return result
-
-    def reject_payment_proof(self, user: dict[str, Any], proof_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.charge_payment_module.reject_payment_proof(user["id"], proof_id, payload)
-        self.persist()
-        return result
-
-    def create_charge_adjustment(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.charge_payment_module.create_charge_adjustment(user["id"], payload)
         self.persist()
         return result
 
@@ -1083,7 +1024,7 @@ class LegacyJsonRuntime:
                     if group_buy["groupId"] == group["id"]
                     and group_buy["status"] in ACTIVE_GROUP_BUY_STATUSES
                 ),
-                "myPendingPaymentCount": self.charge_payment_module.count_pending_charges_for_user(user["id"]),
+                "myPendingPaymentCount": 0,
                 "myDispatchableCount": self.group_buy_records_module.count_member_records_by_status(
                     member_user_id=user["id"],
                     status="可排发",
@@ -1446,8 +1387,6 @@ def create_legacy_json_runtime(config: Config) -> LegacyJsonRuntime:
     if ensure_group_buy_record_state(state):
         needs_persist = True
     if ensure_order_logistics_state(state):
-        needs_persist = True
-    if ensure_charge_payment_state(state):
         needs_persist = True
     if ensure_transfer_exception_state(state):
         needs_persist = True

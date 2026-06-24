@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .auth import AuthModule, ensure_identity_seed
+from .charge_payment import ChargePaymentModule, ChargePaymentRepository
 from .config import Config
 from .db_access import connect
 from .errors import AppError
@@ -12,7 +13,7 @@ from .store import Store, create_store, has_permission
 
 
 class AppContext:
-    """应用组合层：路由只依赖这里，具体后端可逐步从 legacy JSON Store 换成 DB repo。"""
+    """Application composition root for gradually replacing legacy JSON modules."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -20,7 +21,6 @@ class AppContext:
         self.auth = AuthModule(config)
         self.identity_bootstrap = ensure_identity_seed(config, audit_store=self.runtime)
 
-        # 文件/审计已经有 DB 版实现；未配置数据库时继续走 legacy JSON。
         if self.config.database_url:
             self.audit_service = DatabaseAuditService(
                 config=self.config,
@@ -45,20 +45,52 @@ class AppContext:
             audit_service=self.audit_service,
         )
         self.group_buy_records_module = getattr(self.runtime, "group_buy_records_module", None)
-        self.charge_payment_module = getattr(self.runtime, "charge_payment_module", None)
+        self.charge_payment_module = self._build_charge_payment_module()
         self.order_logistics_module = getattr(self.runtime, "order_logistics_module", None)
         self.transfer_exception_module = getattr(self.runtime, "transfer_exception_module", None)
         self.warehouse_dispatch_module = getattr(self.runtime, "warehouse_dispatch_module", None)
+        self._wire_charge_payment_dependencies()
 
     def _wire_file_audit_dependencies(self) -> None:
-        # 其他迁移中模块仍复用 legacy runtime；文件读取入口先切到当前装配的实现。
-        if hasattr(self.runtime, "charge_payment_module"):
-            self.runtime.charge_payment_module.require_active_file_object = (
-                self.file_service.require_active_file_object
-            )
         if hasattr(self.runtime, "order_logistics_module"):
             self.runtime.order_logistics_module.require_active_file_object = (
                 self.file_service.require_active_file_object
+            )
+
+    def _build_charge_payment_module(self) -> ChargePaymentModule | None:
+        if not self.config.database_url:
+            return None
+        return ChargePaymentModule(
+            self.config,
+            repository=ChargePaymentRepository(self.config),
+            audit_service=self.audit_service,
+            file_service=self.file_service,
+            has_permission_by_user_id=self.has_permission_by_user_id,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+            on_charge_confirmed=self.on_charge_confirmed,
+        )
+
+    def _wire_charge_payment_dependencies(self) -> None:
+        if self.charge_payment_module is None:
+            return
+        if self.group_buy_records_module is not None:
+            self.group_buy_records_module.create_charge = (
+                self.charge_payment_module.create_charge_from_related_module
+            )
+        if self.order_logistics_module is not None:
+            self.order_logistics_module.create_charge = (
+                self.charge_payment_module.create_charge_from_related_module
+            )
+        if self.warehouse_dispatch_module is not None:
+            self.warehouse_dispatch_module.create_charge = (
+                self.charge_payment_module.create_charge_from_related_module
+            )
+        if (
+            self.transfer_exception_module is not None
+            and hasattr(self.transfer_exception_module, "record_exceptions")
+        ):
+            self.transfer_exception_module.record_exceptions.create_charge_adjustment = (
+                self.charge_payment_module.create_charge_adjustment
             )
 
     @property
@@ -86,9 +118,31 @@ class AppContext:
     def can_list_audit_logs(self, user: dict[str, Any]) -> bool:
         return has_permission(user, "audit:view")
 
+    def has_permission_by_user_id(self, user_id: str, permission: str) -> bool:
+        user = self.get_user_snapshot_by_id(user_id)
+        return user is not None and has_permission(user, permission)
+
+    def on_charge_confirmed(
+        self,
+        charge_id: str,
+        *,
+        proof_id: str | None,
+        actor_user_id: str | None,
+    ) -> dict[str, Any]:
+        if self.warehouse_dispatch_module is None:
+            return {"updatedCount": 0}
+        result = self.warehouse_dispatch_module.confirm_charge(
+            charge_id,
+            proof_id=proof_id,
+            actor_user_id=actor_user_id,
+        )
+        if result.get("updatedCount"):
+            self.runtime.persist()
+        return result
+
     def assert_goods_permission(self, user: dict[str, Any], permission: str) -> None:
         if not has_permission(user, permission):
-            raise AppError(403, "当前账号没有商品图鉴权限", "FORBIDDEN")
+            raise AppError(403, "current user does not have goods permission", "FORBIDDEN")
 
     def health(self) -> dict[str, Any]:
         health = self.auth.get_health() if self.auth.is_enabled() else self.runtime.get_health()
@@ -133,6 +187,14 @@ class AppContext:
             return self.auth.build_bootstrap(current_user)
         return self.runtime.build_bootstrap(current_user)
 
+    def build_group_home(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        result = self.runtime.build_group_home(group_id, user)
+        if self.charge_payment_module is not None:
+            result["summary"]["myPendingPaymentCount"] = (
+                self.charge_payment_module.count_pending_charges_for_user(user["id"])
+            )
+        return result
+
     def read_me(self, current_user: dict[str, Any]) -> dict[str, Any]:
         if self.auth.is_enabled():
             return self.auth.read_me(current_user)
@@ -140,11 +202,14 @@ class AppContext:
 
     def update_me(self, current_user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         if self.auth.is_enabled():
-            payload = {
-                **payload,
-                "__shadowStore": self.runtime,
-            }
-            return self.auth.update_me(current_user, payload, audit_store=self.runtime)
+            return self.auth.update_me(
+                current_user,
+                {
+                    **payload,
+                    "__shadowStore": self.runtime,
+                },
+                audit_store=self.runtime,
+            )
         return self.runtime.update_me(current_user, payload)
 
     def create_upload_object(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -171,6 +236,54 @@ class AppContext:
 
     def list_audit_logs(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
         return self.audit_service.list_logs(user, filters)
+
+    def _require_charge_payment_module(self) -> ChargePaymentModule:
+        if self.charge_payment_module is None:
+            raise RuntimeError("Charge/payment database module requires DATABASE_URL.")
+        return self.charge_payment_module
+
+    def create_payment_channel(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        return self._require_charge_payment_module().create_payment_channel(user["id"], payload)
+
+    def create_charge(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        if not has_permission(user, "charge:adjust"):
+            raise AppError(403, "current user cannot create charges", "FORBIDDEN")
+        return self._require_charge_payment_module().create_charge(payload, actor_user_id=user["id"])
+
+    def cancel_charge(
+        self,
+        user: dict[str, Any],
+        charge_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._require_charge_payment_module().cancel_charge(user["id"], charge_id, payload)
+
+    def submit_payment_proof(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        return self._require_charge_payment_module().submit_payment_proof(
+            {
+                **payload,
+                "submittedBy": payload.get("submittedBy") or user["id"],
+            }
+        )
+
+    def confirm_payment_proof(
+        self,
+        user: dict[str, Any],
+        proof_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._require_charge_payment_module().confirm_payment_proof(user["id"], proof_id, payload)
+
+    def reject_payment_proof(
+        self,
+        user: dict[str, Any],
+        proof_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._require_charge_payment_module().reject_payment_proof(user["id"], proof_id, payload)
+
+    def create_charge_adjustment(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        return self._require_charge_payment_module().create_charge_adjustment(user["id"], payload)
 
     def create_goods(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         self.assert_goods_permission(user, "goods:create")
@@ -227,5 +340,4 @@ class AppContext:
         return self.goods_catalog_module.search_goods(filters)
 
     def __getattr__(self, name: str) -> Any:
-        # 迁移期兜底：业务接口暂时代理到 runtime。逐模块 DB 化时改成显式方法。
         return getattr(self.runtime, name)
