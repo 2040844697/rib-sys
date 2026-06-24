@@ -4,15 +4,15 @@ from typing import Any
 
 from ..config import Config
 from ..db_access import connect
-from ..store import hash_password
 from .repository import AuthRepository
+from .security import hash_password
 
 
 DEFAULT_GROUP = {
     "id": "group_1",
     "name": "月海谷仓",
     "qqGroupNumber": None,
-    "description": "认证模块一期默认群组，用于保障注册后有基础可见性。",
+    "description": "认证模块默认群组，用于保障注册后有基础可见性。",
 }
 
 ADMIN_ROLES = ["member", "group_buy_maintainer", "stock_keeper", "admin"]
@@ -48,33 +48,7 @@ DEMO_USERS: list[dict[str, Any]] = [
 ]
 
 
-def _mirror_audit(
-    audit_store,
-    *,
-    actor_user_id: str | None,
-    action: str,
-    object_type: str,
-    object_id: str,
-    before: Any,
-    after: Any,
-    reason: str | None,
-) -> None:
-    if audit_store is None:
-        return
-
-    audit_store.create_audit_log(
-        actor_user_id=actor_user_id,
-        action=action,
-        object_type=object_type,
-        object_id=object_id,
-        before=before,
-        after=after,
-        reason=reason,
-    )
-    audit_store.persist()
-
-
-def ensure_identity_seed(config: Config, *, audit_store=None) -> dict[str, Any]:
+def ensure_identity_seed(config: Config) -> dict[str, Any]:
     if not config.database_url:
         return {"enabled": False, "seededAdmin": False, "seededDemoUsers": 0}
 
@@ -114,16 +88,6 @@ def ensure_identity_seed(config: Config, *, audit_store=None) -> dict[str, Any]:
                 after=admin_user,
                 reason="服务启动自动初始化管理员",
             )
-            _mirror_audit(
-                audit_store,
-                actor_user_id=None,
-                action="user.seed_admin",
-                object_type="user",
-                object_id=admin_user["id"],
-                before=None,
-                after=admin_user,
-                reason="服务启动自动初始化管理员",
-            )
             seeded_admin = True
         else:
             repo.ensure_user_roles(conn, admin_user["id"], ADMIN_ROLES)
@@ -148,16 +112,6 @@ def ensure_identity_seed(config: Config, *, audit_store=None) -> dict[str, Any]:
                 )
                 repo.create_audit_log(
                     conn,
-                    actor_user_id=None,
-                    action="user.seed_demo",
-                    object_type="user",
-                    object_id=created["id"],
-                    before=None,
-                    after=created,
-                    reason="服务启动自动初始化演示账号",
-                )
-                _mirror_audit(
-                    audit_store,
                     actor_user_id=None,
                     action="user.seed_demo",
                     object_type="user",

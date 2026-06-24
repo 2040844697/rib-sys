@@ -29,23 +29,20 @@ CONFIG = load_config(ROOT_DIR)
 
 
 def _initialize_database_bootstrap():
+    if not CONFIG.database_url:
+        raise RuntimeError("DATABASE_URL is required.")
+
     print(
         "[ribsys-api] config sources: "
         f"DATABASE_URL={CONFIG.database_url_source}, "
         f"RIBSYS_INIT_DB_ON_STARTUP={CONFIG.init_db_on_startup_source}"
     )
-    if CONFIG.database_url:
-        print(
-            "[ribsys-api] database bootstrap config: "
-            f"target={describe_database_target(CONFIG)}, "
-            f"initOnStartup={CONFIG.init_db_on_startup}, "
-            f"initSql={CONFIG.db_init_sql_file}"
-        )
-    else:
-        print(
-            "[ribsys-api] database bootstrap config: "
-            "DATABASE_URL not configured; startup init will be skipped"
-        )
+    print(
+        "[ribsys-api] database bootstrap config: "
+        f"target={describe_database_target(CONFIG)}, "
+        f"initOnStartup={CONFIG.init_db_on_startup}, "
+        f"initSql={CONFIG.db_init_sql_file}"
+    )
 
     return initialize_database_schema(CONFIG)
 
@@ -523,23 +520,16 @@ def main() -> None:
 
     print(f"[ribsys-api] listening on http://{CONFIG.host}:{CONFIG.port}")
     print(f"[ribsys-api] data backend: {APP_CONTEXT.startup_info['dataBackend']}")
-    if APP_CONTEXT.startup_info["usesLegacyJsonStore"]:
-        print(f"[ribsys-api] legacy runtime data file: {CONFIG.data_file}")
-    if CONFIG.database_url:
-        suffix = DB_BOOTSTRAP.checksum[:12] if DB_BOOTSTRAP.checksum else "-"
-        print(
-            f"[ribsys-api] database bootstrap: {DB_BOOTSTRAP.reason} "
-            f"(applied={DB_BOOTSTRAP.applied}, checksum={suffix})"
-        )
-        print(
-            "[ribsys-api] identity bootstrap: "
-            f"seededAdmin={APP_CONTEXT.identity_bootstrap['seededAdmin']}, "
-            f"seededDemoUsers={APP_CONTEXT.identity_bootstrap['seededDemoUsers']}"
-        )
-    else:
-        print("[ribsys-api] database bootstrap: skipped (DATABASE_URL not configured)")
-    if APP_CONTEXT.startup_info["createdFreshData"]:
-        print("[ribsys-api] first start detected, seed data has been written.")
+    suffix = DB_BOOTSTRAP.checksum[:12] if DB_BOOTSTRAP.checksum else "-"
+    print(
+        f"[ribsys-api] database bootstrap: {DB_BOOTSTRAP.reason} "
+        f"(applied={DB_BOOTSTRAP.applied}, checksum={suffix})"
+    )
+    print(
+        "[ribsys-api] identity bootstrap: "
+        f"seededAdmin={APP_CONTEXT.identity_bootstrap['seededAdmin']}, "
+        f"seededDemoUsers={APP_CONTEXT.identity_bootstrap['seededDemoUsers']}"
+    )
     print(
         "[ribsys-api] seed accounts: member / maintainer / stock / admin "
         "(default password 123456 unless overridden by env)."

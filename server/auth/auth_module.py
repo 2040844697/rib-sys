@@ -5,8 +5,9 @@ from typing import Any
 from ..config import Config
 from ..db_access import connect, to_iso
 from ..errors import AppError
-from ..store import create_seed_user, list_capabilities, normalize_text, verify_password
+from .permissions import list_capabilities
 from .repository import AuthRepository
+from .security import hash_password, normalize_text, verify_password
 from .sessions import SessionRepository
 
 
@@ -33,40 +34,12 @@ class AuthModule:
     def get_health(self) -> dict[str, Any]:
         return self.repo.get_health_counts()
 
-    def _mirror_audit(
-        self,
-        audit_store,
-        *,
-        actor_user_id: str | None,
-        action: str,
-        object_type: str,
-        object_id: str,
-        before: Any,
-        after: Any,
-        reason: str | None,
-    ) -> None:
-        if audit_store is None:
-            return
-
-        # 认证已走数据库，这里补一份统一审计日志，便于现阶段联调排查。
-        audit_store.create_audit_log(
-            actor_user_id=actor_user_id,
-            action=action,
-            object_type=object_type,
-            object_id=object_id,
-            before=before,
-            after=after,
-            reason=reason,
-        )
-        audit_store.persist()
-
     def login(
         self,
         payload: dict[str, Any],
         *,
         created_ip: str | None,
         user_agent: str | None,
-        audit_store=None,
     ) -> dict[str, Any]:
         account = normalize_text(payload.get("account"), "账号")
         password = normalize_text(payload.get("password"), "密码", 6)
@@ -106,17 +79,6 @@ class AuthModule:
             )
             conn.commit()
 
-        self._mirror_audit(
-            audit_store,
-            actor_user_id=user["id"],
-            action="auth.login",
-            object_type="user",
-            object_id=user["id"],
-            before=None,
-            after=audit_after,
-            reason="用户登录",
-        )
-
         return {
             "userId": user["id"],
             "displayName": user["displayName"],
@@ -128,13 +90,7 @@ class AuthModule:
             },
         }
 
-    def register_user(
-        self,
-        payload: dict[str, Any],
-        *,
-        shadow_store=None,
-        audit_store=None,
-    ) -> dict[str, Any]:
+    def register_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         display_name = normalize_text(payload.get("displayName"), "展示名", 2)
         qq_number = normalize_text(payload.get("qqNumber"), "QQ 号", 5)
         group_nickname = normalize_text(payload.get("groupNickname"), "群昵称", 2)
@@ -144,14 +100,12 @@ class AuthModule:
         if password != confirm_password:
             raise AppError(400, "两次输入的密码不一致", "VALIDATION_FAILED")
 
-        from ..store import hash_password
-
         with connect(self.config) as conn:
             duplicated = self.repo.get_user_by_account_or_qq(conn, qq_number)
             if duplicated is not None:
                 raise AppError(
                     400,
-                    "这个 QQ 号已被使用，可直接登录或联系管理员。",
+                    "这个 QQ 号已被使用，可以直接登录或联系管理员。",
                     "DUPLICATED_OPERATION",
                 )
 
@@ -159,7 +113,6 @@ class AuthModule:
             if not default_group_id:
                 raise AppError(500, "默认群组不存在，无法完成注册", "DEFAULT_GROUP_MISSING")
 
-            # 使用可读 ID，方便本地联调排查；若重复则自动退让。
             user_id = f"user_{qq_number}"
             suffix = 1
             while self.repo.get_user_by_id(conn, user_id) is not None:
@@ -189,32 +142,6 @@ class AuthModule:
             )
             conn.commit()
 
-        self._mirror_audit(
-            audit_store,
-            actor_user_id=None,
-            action="user.register",
-            object_type="user",
-            object_id=created_user["id"],
-            before=None,
-            after=created_user,
-            reason="前端注册",
-        )
-
-        if shadow_store is not None:
-            # 业务页暂时仍读 JSON，这里补最小影子用户，保证页面可见性。
-            shadow_store.sync_registered_user(
-                create_seed_user(
-                    user_id=created_user["id"],
-                    group_id=created_user["groupId"],
-                    account=created_user["account"],
-                    password=password,
-                    display_name=created_user["displayName"],
-                    qq_number=created_user["qqNumber"],
-                    group_nickname=created_user["groupNickname"],
-                    roles=created_user["roles"],
-                )
-            )
-
         return {
             "ok": True,
             "userId": created_user["id"],
@@ -238,16 +165,14 @@ class AuthModule:
             conn.commit()
             return user
 
-    def logout(self, session_token: str | None, *, audit_store=None) -> dict[str, Any]:
+    def logout(self, session_token: str | None) -> dict[str, Any]:
         if not session_token:
             return {"ok": True}
 
-        audit_user_id: str | None = None
         with connect(self.config) as conn:
             session = self.sessions.get_active_session_by_token(conn, session_token)
             self.sessions.revoke_session_by_token(conn, session_token)
             if session is not None:
-                audit_user_id = session["user_id"]
                 self.repo.create_audit_log(
                     conn,
                     actor_user_id=session["user_id"],
@@ -260,17 +185,6 @@ class AuthModule:
                 )
             conn.commit()
 
-        if audit_user_id is not None:
-            self._mirror_audit(
-                audit_store,
-                actor_user_id=audit_user_id,
-                action="auth.logout",
-                object_type="user",
-                object_id=audit_user_id,
-                before=None,
-                after=None,
-                reason="用户登出",
-            )
         return {"ok": True}
 
     def build_bootstrap(self, user: dict[str, Any]) -> dict[str, Any]:
@@ -283,7 +197,7 @@ class AuthModule:
     def read_me(self, user: dict[str, Any]) -> dict[str, Any]:
         return _user_snapshot(user)
 
-    def update_me(self, user: dict[str, Any], payload: dict[str, Any], *, audit_store=None) -> dict[str, Any]:
+    def update_me(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         display_name = normalize_text(payload.get("displayName"), "展示名", 2)
         group_nickname = normalize_text(payload.get("groupNickname"), "群昵称", 2)
 
@@ -309,24 +223,5 @@ class AuthModule:
                 reason="用户更新个人资料",
             )
             conn.commit()
-
-        self._mirror_audit(
-            audit_store,
-            actor_user_id=user["id"],
-            action="user.update_profile",
-            object_type="user",
-            object_id=user["id"],
-            before=before,
-            after=updated,
-            reason="用户更新个人资料",
-        )
-
-        shadow_store = payload.get("__shadowStore")
-        if shadow_store is not None:
-            shadow_store.sync_user_profile(
-                user_id=user["id"],
-                display_name=display_name,
-                group_nickname=group_nickname,
-            )
 
         return {"ok": True}

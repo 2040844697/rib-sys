@@ -66,32 +66,6 @@ def clone(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def ensure_order_logistics_state(state: dict[str, Any]) -> bool:
-    # 订单物流已迁移到 DB；旧 JSON 状态只做删除清理。
-    changed = False
-    for key in (
-        "orderScreenshots",
-        "internationalBatches",
-        "internationalBatchRecords",
-        "internationalFeeAllocations",
-    ):
-        if key in state:
-            state.pop(key, None)
-            changed = True
-
-    counters = state.setdefault("counters", {})
-    for key in (
-        "orderScreenshot",
-        "internationalBatch",
-        "internationalBatchRecord",
-        "internationalFeeAllocation",
-    ):
-        if key in counters:
-            counters.pop(key, None)
-            changed = True
-    return changed
-
-
 def _normalize_required_text(value: Any, field_name: str, min_length: int = 1) -> str:
     # 统一校验必填文本字段。
     normalized = value.strip() if isinstance(value, str) else ""

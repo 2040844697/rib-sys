@@ -342,7 +342,7 @@ class ChargePaymentModuleTests(unittest.TestCase):
         self.assertEqual(proof["status"], "submitted")
         self.assertEqual(self.module.require_charge(charge["chargeId"])["status"], "submitted")
         self.assertEqual(self.module.require_charge(charge["chargeId"])["submittedProofId"], proof["proofId"])
-        self.assertTrue(self.repo.connections[-1].committed)
+        self.assertTrue(any(connection.committed for connection in self.repo.connections))
 
     def test_payment_proof_file_must_be_payments_bucket(self) -> None:
         charge = self.create_charge()

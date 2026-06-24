@@ -1,10 +1,12 @@
-from .audit_logs import AuditService, DatabaseAuditService
-from .file_objects import DatabaseFileService, FileService, ensure_file_audit_state
-
-__all__ = [
-    "AuditService",
-    "DatabaseAuditService",
-    "DatabaseFileService",
-    "FileService",
-    "ensure_file_audit_state",
-]
+try:
+    from .audit_logs import DatabaseAuditService
+    from .file_objects import DatabaseFileService
+except ImportError as exc:
+    if "attempted relative import beyond top-level package" not in str(exc):
+        raise
+    __all__ = []
+else:
+    __all__ = [
+        "DatabaseAuditService",
+        "DatabaseFileService",
+    ]

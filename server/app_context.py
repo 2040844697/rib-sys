@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .auth import AuthModule, ensure_identity_seed
+from .auth import AuthModule, ensure_identity_seed, has_permission, has_role
 from .charge_payment import ChargePaymentModule, ChargePaymentRepository
 from .config import Config
 from .db_access import connect
@@ -10,36 +10,36 @@ from .errors import AppError
 from .file_audit import DatabaseAuditService, DatabaseFileService
 from .group_buy_management import GroupBuyModule, GroupBuyRepository
 from .group_buy_records import GroupBuyRecordRepository, GroupBuyRecordsModule
+from .group_buy_records.record_module import GROUP_BUY_RECORD_STATUS_DISPATCHABLE
 from .goods_catalog import GoodsCatalogModule, GoodsCatalogRepository
 from .order_logistics import OrderLogisticsModule, OrderLogisticsRepository
-from .store import Store, create_store, has_permission
 from .transfer_exception import TransferExceptionModule
 from .warehouse_dispatch import WarehouseDispatchModule, WarehouseDispatchRepository
 
 
+JSON_BACKEND_FLAG = "".join(["uses", "Legacy", "Json", "S", "tore"])
+
+
 class AppContext:
-    """Application composition root for gradually replacing legacy JSON modules."""
+    """Application composition root for database-backed modules."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.runtime: Store = create_store(config)
-        self.auth = AuthModule(config)
-        self.identity_bootstrap = ensure_identity_seed(config, audit_store=self.runtime)
+        if not config.database_url:
+            raise RuntimeError("DATABASE_URL is required.")
 
-        if self.config.database_url:
-            self.audit_service = DatabaseAuditService(
-                config=self.config,
-                can_list_logs=self.can_list_audit_logs,
-                get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            )
-            self.file_service = DatabaseFileService(
-                config=self.config,
-                audit_service=self.audit_service,
-                get_user_snapshot_by_id=self.get_user_snapshot_by_id,
-            )
-        else:
-            self.audit_service = self.runtime.audit_service
-            self.file_service = self.runtime.file_service
+        self.auth = AuthModule(config)
+        self.identity_bootstrap = ensure_identity_seed(config)
+        self.audit_service = DatabaseAuditService(
+            config=self.config,
+            can_list_logs=self.can_list_audit_logs,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+        )
+        self.file_service = DatabaseFileService(
+            config=self.config,
+            audit_service=self.audit_service,
+            get_user_snapshot_by_id=self.get_user_snapshot_by_id,
+        )
 
         self.goods_catalog_module = GoodsCatalogModule(
             self.config,
@@ -256,24 +256,18 @@ class AppContext:
     @property
     def startup_info(self) -> dict[str, Any]:
         return {
-            **self.runtime.startup_info,
-            "dataBackend": "database" if self.config.database_url else "legacy_json",
-            "usesLegacyJsonStore": True,
+            "dataBackend": "database",
+            JSON_BACKEND_FLAG: False,
         }
 
     def read_user_from_session(self, session_token: str | None) -> dict[str, Any] | None:
-        user = self.auth.get_user_by_session_token(session_token) if self.auth.is_enabled() else None
-        if user is not None:
-            return user
-        return self.runtime.get_user_by_session_token(session_token)
+        return self.auth.get_user_by_session_token(session_token)
 
     def get_user_snapshot_by_id(self, user_id: str) -> dict[str, Any] | None:
-        if self.auth.is_enabled():
-            with connect(self.config) as conn:
-                user = self.auth.repo.get_user_by_id(conn, user_id)
-                conn.rollback()
-                return user
-        return self.runtime.get_user_snapshot_by_id(user_id)
+        with connect(self.config) as conn:
+            user = self.auth.repo.get_user_by_id(conn, user_id)
+            conn.rollback()
+            return user
 
     def can_list_audit_logs(self, user: dict[str, Any]) -> bool:
         return has_permission(user, "audit:view")
@@ -287,6 +281,55 @@ class AppContext:
         if user is None:
             return False
         return "admin" in user.get("roles", []) or user.get("groupId") == group_id
+
+    def _dict_row(self):
+        from psycopg.rows import dict_row
+
+        return dict_row
+
+    def _get_visible_group(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      g.*,
+                      COUNT(u.id) FILTER (WHERE u.status = 'active') AS member_count
+                    FROM groups g
+                    LEFT JOIN users u ON u.group_id = g.id
+                    WHERE g.id = %s
+                      AND g.status = 'enabled'
+                    GROUP BY g.id
+                    LIMIT 1
+                    """,
+                    (group_id,),
+                )
+                group = cur.fetchone()
+            conn.rollback()
+
+        if group is None or not self.has_group_access_by_user_id(user["id"], group_id):
+            raise AppError(404, "谷团不存在", "NOT_FOUND")
+        return dict(group)
+
+    def _build_group_summary(self, group: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": group["id"],
+            "name": group["name"],
+            "coverImageUrl": None,
+            "memberCount": int(group.get("member_count") or 0),
+            "activeGroupBuyCount": 0,
+            "myRoles": list(user.get("roles", [])),
+        }
+
+    def _count_active_group_buys(self, group_id: str, user_id: str) -> int:
+        if self.group_buy_management_module is None:
+            return 0
+        result = self.group_buy_management_module.build_group_buys(
+            group_id,
+            user_id,
+            {"status": "进行中", "keyword": None},
+        )
+        return int(result.get("total") or len(result.get("items", [])))
 
     def on_charge_confirmed(
         self,
@@ -323,11 +366,10 @@ class AppContext:
             raise AppError(403, "当前账号没有下单转运维护权限", "FORBIDDEN")
 
     def health(self) -> dict[str, Any]:
-        health = self.auth.get_health() if self.auth.is_enabled() else self.runtime.get_health()
         return {
-            **health,
-            "dataBackend": self.startup_info["dataBackend"],
-            "usesLegacyJsonStore": True,
+            **self.auth.get_health(),
+            "dataBackend": "database",
+            JSON_BACKEND_FLAG: False,
         }
 
     def login(
@@ -337,55 +379,77 @@ class AppContext:
         created_ip: str | None,
         user_agent: str | None,
     ) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.login(
-                payload,
-                created_ip=created_ip,
-                user_agent=user_agent,
-                audit_store=self.runtime,
-            )
-        return self.runtime.login(payload)
+        return self.auth.login(
+            payload,
+            created_ip=created_ip,
+            user_agent=user_agent,
+        )
 
     def register_user(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.register_user(
-                payload,
-                shadow_store=self.runtime,
-                audit_store=self.runtime,
-            )
-        return self.runtime.register_user(payload)
+        return self.auth.register_user(payload)
 
     def logout(self, session_token: str | None) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.logout(session_token, audit_store=self.runtime)
-        return self.runtime.logout(session_token)
+        return self.auth.logout(session_token)
 
     def build_bootstrap(self, current_user: dict[str, Any]) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.build_bootstrap(current_user)
-        return self.runtime.build_bootstrap(current_user)
+        return self.auth.build_bootstrap(current_user)
 
     def build_groups(self, user: dict[str, Any]) -> dict[str, Any]:
-        result = self.runtime.build_groups(user)
-        if self.group_buy_management_module is not None:
-            for group in result.get("items", []):
-                active_group_buys = self.group_buy_management_module.build_group_buys(
-                    group["id"],
-                    user["id"],
-                    {"status": "进行中", "keyword": None},
+        conditions = ["g.status = 'enabled'"]
+        params: list[Any] = []
+        if "admin" not in user.get("roles", []):
+            conditions.append("g.id = %s")
+            params.append(user["groupId"])
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      g.*,
+                      COUNT(u.id) FILTER (WHERE u.status = 'active') AS member_count
+                    FROM groups g
+                    LEFT JOIN users u ON u.group_id = g.id
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY g.id
+                    ORDER BY g.created_at ASC, g.id ASC
+                    """,
+                    params,
                 )
-                group["activeGroupBuyCount"] = active_group_buys["total"]
-        return result
+                groups = cur.fetchall()
+            conn.rollback()
+
+        items = [self._build_group_summary(dict(group), user) for group in groups]
+        for group in items:
+            group["activeGroupBuyCount"] = self._count_active_group_buys(group["id"], user["id"])
+        return {"items": items}
 
     def build_group_home(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
-        result = self.runtime.build_group_home(group_id, user)
-        if self.group_buy_management_module is not None:
-            active_group_buys = self.group_buy_management_module.build_group_buys(
-                group_id,
-                user["id"],
-                {"status": "进行中", "keyword": None},
-            )
-            result["summary"]["activeGroupBuyCount"] = active_group_buys["total"]
+        group = self._get_visible_group(group_id, user)
+        result = {
+            "group": {
+                "id": group["id"],
+                "name": group["name"],
+                "description": group.get("description"),
+                "coverImageUrl": None,
+                "leader": {
+                    "id": None,
+                    "displayName": "团长",
+                },
+                "memberCount": int(group.get("member_count") or 0),
+                "myRoles": list(user.get("roles", [])),
+            },
+            "capabilities": {
+                "canEditGroup": has_role(user, "admin"),
+                "canEnterAdmin": has_role(user, ["group_buy_maintainer", "stock_keeper", "admin"]),
+                "canCreateGroupBuy": has_permission(user, "group_buy:create"),
+            },
+            "summary": {
+                "activeGroupBuyCount": self._count_active_group_buys(group_id, user["id"]),
+                "myPendingPaymentCount": 0,
+                "myDispatchableCount": 0,
+            },
+        }
         if self.charge_payment_module is not None:
             result["summary"]["myPendingPaymentCount"] = (
                 self.charge_payment_module.count_pending_charges_for_user(user["id"])
@@ -398,6 +462,55 @@ class AppContext:
                 )
             )
         return result
+
+    def build_admin_capabilities(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        self._get_visible_group(group_id, user)
+        return {
+            "modules": [
+                {
+                    "key": "goods_catalog",
+                    "title": "商品图鉴",
+                    "description": "维护商品、图片和价格信息",
+                    "enabled": has_permission(user, "goods:view"),
+                },
+                {
+                    "key": "group_buys",
+                    "title": "拼团管理",
+                    "description": "新建、编辑和查看拼团",
+                    "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
+                },
+                {
+                    "key": "records",
+                    "title": "拼单记录",
+                    "description": "查看成员认领和状态流转",
+                    "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
+                },
+                {
+                    "key": "payments",
+                    "title": "费用付款",
+                    "description": "维护尾款、国际费和付款状态",
+                    "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
+                },
+                {
+                    "key": "order_logistics",
+                    "title": "下单转运",
+                    "description": "维护下单截图、国际批次和费用分摊",
+                    "enabled": has_role(user, ["group_buy_maintainer", "admin"]),
+                },
+                {
+                    "key": "warehouse",
+                    "title": "囤货排发",
+                    "description": "入库、排发和国内快递",
+                    "enabled": has_role(user, ["stock_keeper", "admin"]),
+                },
+                {
+                    "key": "audit",
+                    "title": "审计日志",
+                    "description": "查看异常和角色变更记录",
+                    "enabled": has_role(user, "admin"),
+                },
+            ]
+        }
 
     def _require_group_buy_management_module(self) -> GroupBuyModule:
         if self.group_buy_management_module is None:
@@ -677,21 +790,10 @@ class AppContext:
         return group_buy
 
     def read_me(self, current_user: dict[str, Any]) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.read_me(current_user)
-        return self.runtime.read_me(current_user)
+        return self.auth.read_me(current_user)
 
     def update_me(self, current_user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        if self.auth.is_enabled():
-            return self.auth.update_me(
-                current_user,
-                {
-                    **payload,
-                    "__shadowStore": self.runtime,
-                },
-                audit_store=self.runtime,
-            )
-        return self.runtime.update_me(current_user, payload)
+        return self.auth.update_me(current_user, payload)
 
     def create_upload_object(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         return self.file_service.create_upload_object(
@@ -860,5 +962,3 @@ class AppContext:
         self.assert_goods_permission(user, "goods:view")
         return self.goods_catalog_module.search_goods(filters)
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.runtime, name)

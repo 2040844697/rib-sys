@@ -57,19 +57,6 @@ def clone(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def ensure_group_buy_record_state(state: dict[str, Any]) -> bool:
-    # 团购记录已迁移到 DB，旧 JSON 不再补主记录状态。
-    changed = False
-    if "groupBuyRecords" in state:
-        state.pop("groupBuyRecords", None)
-        changed = True
-    counters = state.setdefault("counters", {})
-    if "groupBuyRecord" in counters:
-        counters.pop("groupBuyRecord", None)
-        changed = True
-    return changed
-
-
 def _status_priority(status: str | None) -> int:
     # 展示状态排序值保留在主表，列表可直接排序。
     if not status:

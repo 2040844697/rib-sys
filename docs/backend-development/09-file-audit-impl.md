@@ -11,7 +11,7 @@
 
 当前实现位于 [server/file_audit/audit_logs.py](/C:/Users/n2040/Documents/Ribsys/server/file_audit/audit_logs.py) 和 [server/file_audit/file_objects.py](/C:/Users/n2040/Documents/Ribsys/server/file_audit/file_objects.py)，并由 [server/app_context.py](/C:/Users/n2040/Documents/Ribsys/server/app_context.py) 统一装配。
 
-当配置了 `DATABASE_URL` 时，应用会使用数据库版 `DatabaseAuditService` / `DatabaseFileService`，直接读写 `audit_logs` 和 `file_objects` 表。未配置数据库时，legacy JSON runtime 仍保留旧实现，用于迁移期本地联调和旧测试。
+应用使用数据库版 `DatabaseAuditService` / `DatabaseFileService`，直接读写 `audit_logs` 和 `file_objects` 表。`DATABASE_URL` 是启动必需配置；本地 JSON 兼容实现已经移除。
 
 ## 当前功能
 
@@ -134,8 +134,7 @@
 
 - 文件对象元数据的校验、登记、作废
 - 审计日志的写入、裁剪、查询
-- 数据库模式下读写 `file_objects` / `audit_logs`
-- legacy JSON 模式下保留旧状态兼容
+- 读写 `file_objects` / `audit_logs`
 
 本模块暂不负责：
 
@@ -340,24 +339,14 @@
 
 ## 存储说明
 
-当前应用路径在 `DATABASE_URL` 存在时使用 PostgreSQL。
+当前应用路径使用 PostgreSQL。
 
 数据库表：
 
 - `file_objects`
 - `audit_logs`
 
-legacy JSON 模式仍保留以下状态字段：
-
-- `state.fileObjects`
-- `state.auditLogs`
-- `state.counters.fileObject`
-- `state.counters.auditLog`
-
-兼容处理：
-
-- 服务启动时会自动补齐旧状态中的 `fileObjects`
-- 如果旧数据缺少 `fileObject` 或 `auditLog` 计数器，也会自动补齐
+旧本地 JSON 状态字段和启动补齐逻辑已经删除。
 
 ## 后续接入建议
 
@@ -370,4 +359,4 @@ legacy JSON 模式仍保留以下状态字段：
 
 - 校验规则统一
 - 审计格式统一
-- 后续从 JSON 切到数据库时改动面更小
+- 各业务模块不需要自行处理审计表和文件表细节
