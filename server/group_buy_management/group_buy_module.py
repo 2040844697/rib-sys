@@ -194,6 +194,35 @@ def _parse_datetime(value: Any, field_name: str) -> datetime | None:
         raise AppError(400, f"{field_name}格式不正确", "VALIDATION_FAILED") from exc
 
 
+def _normalize_optional_bool(value: Any, field_name: str, default_value: bool) -> bool:
+    if value is None:
+        return default_value
+    if isinstance(value, bool):
+        return value
+    raise AppError(400, f"{field_name}格式不正确", "VALIDATION_FAILED")
+
+
+def _normalize_advanced_settings(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AppError(400, "advancedSettings格式不正确", "VALIDATION_FAILED")
+    allowed_keys = {
+        "remindBeforeStart",
+        "showParticipantCount",
+        "showTotalAmount",
+        "showClaimedQuantity",
+    }
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if key not in allowed_keys:
+            continue
+        if not isinstance(item, bool):
+            raise AppError(400, f"advancedSettings.{key}格式不正确", "VALIDATION_FAILED")
+        normalized[key] = item
+    return normalized
+
+
 def _payload_get(payload: dict[str, Any], *keys: str) -> tuple[bool, Any]:
     for key in keys:
         if key in payload:
@@ -478,7 +507,15 @@ class GroupBuyModule:
                 "type": group_buy["type"],
                 "status": group_buy["status"],
                 "description": group_buy["description"],
+                "startAt": group_buy.get("startAt"),
                 "closeAt": group_buy["closeAt"],
+                "coverFileObjectId": group_buy.get("coverFileObjectId"),
+                "coverImageUrl": group_buy.get("coverImageUrl"),
+                "claimMode": group_buy.get("claimMode"),
+                "canCancelClaim": group_buy.get("canCancelClaim"),
+                "saleMode": group_buy.get("saleMode"),
+                "allowTransfer": group_buy.get("allowTransfer"),
+                "advancedSettings": group_buy.get("advancedSettings") or {},
                 "paymentChannelId": group_buy["paymentChannelId"],
                 "warehouseUserId": group_buy["warehouseUserId"],
             },
@@ -532,9 +569,52 @@ class GroupBuyModule:
                 description=_normalize_optional_text(payload.get("description"), "拼单说明"),
                 status=GROUP_BUY_STATUS_WAITING,
                 owner_user_id=actor_user_id,
+                start_at=_parse_datetime(
+                    payload.get("startAt") if "startAt" in payload else payload.get("start_at"),
+                    "开始时间",
+                ),
                 close_at=_parse_datetime(
                     payload.get("closeAt") if "closeAt" in payload else payload.get("close_at"),
                     "截团时间",
+                ),
+                cover_file_object_id=_normalize_optional_text(
+                    payload.get("coverFileObjectId")
+                    if "coverFileObjectId" in payload
+                    else payload.get("cover_file_object_id"),
+                    "活动主图文件",
+                ),
+                cover_image_url=_normalize_optional_text(
+                    payload.get("coverImageUrl")
+                    if "coverImageUrl" in payload
+                    else payload.get("cover_image_url"),
+                    "活动主图",
+                ),
+                claim_mode=_normalize_optional_text(
+                    payload.get("claimMode") if "claimMode" in payload else payload.get("claim_mode"),
+                    "拼谷类型",
+                ),
+                can_cancel_claim=_normalize_optional_bool(
+                    payload.get("canCancelClaim")
+                    if "canCancelClaim" in payload
+                    else payload.get("can_cancel_claim"),
+                    "是否允许撤排",
+                    False,
+                ),
+                sale_mode=_normalize_optional_text(
+                    payload.get("saleMode") if "saleMode" in payload else payload.get("sale_mode"),
+                    "售卖方式",
+                ),
+                allow_transfer=_normalize_optional_bool(
+                    payload.get("allowTransfer")
+                    if "allowTransfer" in payload
+                    else payload.get("allow_transfer"),
+                    "是否允许转单",
+                    True,
+                ),
+                advanced_settings=_normalize_advanced_settings(
+                    payload.get("advancedSettings")
+                    if "advancedSettings" in payload
+                    else payload.get("advanced_settings")
                 ),
                 payment_channel_id=_normalize_optional_text(
                     payload.get("paymentChannelId")
@@ -591,9 +671,42 @@ class GroupBuyModule:
                     payload.get("description", group_buy["description"]),
                     "拼单说明",
                 ),
+                start_at=_parse_datetime(
+                    payload.get("startAt", group_buy.get("startAt")),
+                    "开始时间",
+                ),
                 close_at=_parse_datetime(
                     payload.get("closeAt", group_buy["closeAt"]),
                     "截团时间",
+                ),
+                cover_file_object_id=_normalize_optional_text(
+                    payload.get("coverFileObjectId", group_buy.get("coverFileObjectId")),
+                    "活动主图文件",
+                ),
+                cover_image_url=_normalize_optional_text(
+                    payload.get("coverImageUrl", group_buy.get("coverImageUrl")),
+                    "活动主图",
+                ),
+                claim_mode=_normalize_optional_text(
+                    payload.get("claimMode", group_buy.get("claimMode")),
+                    "拼谷类型",
+                ),
+                can_cancel_claim=_normalize_optional_bool(
+                    payload.get("canCancelClaim", group_buy.get("canCancelClaim")),
+                    "是否允许撤排",
+                    False,
+                ),
+                sale_mode=_normalize_optional_text(
+                    payload.get("saleMode", group_buy.get("saleMode")),
+                    "售卖方式",
+                ),
+                allow_transfer=_normalize_optional_bool(
+                    payload.get("allowTransfer", group_buy.get("allowTransfer")),
+                    "是否允许转单",
+                    True,
+                ),
+                advanced_settings=_normalize_advanced_settings(
+                    payload.get("advancedSettings", group_buy.get("advancedSettings") or {})
                 ),
                 payment_channel_id=_normalize_optional_text(
                     payload.get("paymentChannelId", group_buy["paymentChannelId"]),
@@ -610,7 +723,15 @@ class GroupBuyModule:
                     "type",
                     "title",
                     "description",
+                    "startAt",
                     "closeAt",
+                    "coverFileObjectId",
+                    "coverImageUrl",
+                    "claimMode",
+                    "canCancelClaim",
+                    "saleMode",
+                    "allowTransfer",
+                    "advancedSettings",
                     "paymentChannelId",
                     "warehouseUserId",
                 )
@@ -639,7 +760,9 @@ class GroupBuyModule:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         self._assert_database_enabled()
-        new_status = _normalize_group_buy_status(payload.get("newStatus"))
+        new_status = _normalize_group_buy_status(
+            payload.get("newStatus") if "newStatus" in payload else payload.get("status")
+        )
         reason = _normalize_required_text(payload.get("reason"), "reason", 2)
 
         with connect(self.config) as conn:
@@ -964,6 +1087,34 @@ class GroupBuyModule:
             )
             conn.commit()
         return {"groupBuyItemId": group_buy_item_id, "updatedFields": updated_fields}
+
+    def delete_group_buy_item(self, actor_user_id: str, group_buy_item_id: str) -> dict[str, Any]:
+        self._assert_database_enabled()
+
+        with connect(self.config) as conn:
+            group_buy_item = self._require_group_buy_item(conn, group_buy_item_id)
+            group_buy = self._require_group_buy(conn, group_buy_item["groupBuyId"])
+            self._require_group_access(actor_user_id, group_buy["groupId"])
+            self._assert_group_buy_mutable(group_buy)
+            if not self._can_edit_group_buy(actor_user_id, group_buy):
+                raise AppError(403, "当前账号没有维护拼单商品的权限", "FORBIDDEN")
+            if group_buy_item["claimedQuantity"] > 0:
+                raise AppError(400, "已有成员认领的谷子不能直接删除", "GROUP_BUY_ITEM_CLAIMED")
+
+            if not self.repo.delete_group_buy_item(conn, group_buy_item_id):
+                raise AppError(404, "拼单商品不存在", "NOT_FOUND")
+            self._audit(
+                conn,
+                actor_user_id=actor_user_id,
+                action="group_buy_item.delete",
+                object_type="group_buy_item",
+                object_id=group_buy_item_id,
+                before=group_buy_item,
+                after=None,
+                reason="删除未认领谷子",
+            )
+            conn.commit()
+        return {"ok": True, "groupBuyItemId": group_buy_item_id}
 
     def claim_group_buy_item(
         self,

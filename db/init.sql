@@ -60,6 +60,24 @@ CREATE TABLE IF NOT EXISTS user_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_user_aliases_user_id ON user_aliases(user_id);
 
+CREATE TABLE IF NOT EXISTS user_addresses (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  receiver_name TEXT NOT NULL,
+  receiver_phone TEXT NOT NULL,
+  province TEXT,
+  city TEXT,
+  district TEXT,
+  detail_address TEXT NOT NULL,
+  postal_code TEXT,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_addresses_user_id ON user_addresses(user_id);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -178,12 +196,44 @@ CREATE TABLE IF NOT EXISTS group_buys (
   description TEXT,
   status TEXT NOT NULL,
   owner_user_id TEXT REFERENCES users(id),
+  start_at TIMESTAMPTZ,
   close_at TIMESTAMPTZ,
+  cover_file_object_id TEXT REFERENCES file_objects(id),
+  cover_image_url TEXT,
+  claim_mode TEXT,
+  can_cancel_claim BOOLEAN NOT NULL DEFAULT FALSE,
+  sale_mode TEXT,
+  allow_transfer BOOLEAN NOT NULL DEFAULT TRUE,
+  advanced_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
   payment_channel_id TEXT REFERENCES payment_channels(id),
   warehouse_user_id TEXT REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS start_at TIMESTAMPTZ;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS cover_file_object_id TEXT REFERENCES file_objects(id);
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS cover_image_url TEXT;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS claim_mode TEXT;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS can_cancel_claim BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS sale_mode TEXT;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS allow_transfer BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE group_buys
+  ADD COLUMN IF NOT EXISTS advanced_settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_group_buys_group_id ON group_buys(group_id);
 CREATE INDEX IF NOT EXISTS idx_group_buys_status ON group_buys(status);

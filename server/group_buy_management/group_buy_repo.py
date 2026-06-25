@@ -27,6 +27,11 @@ def _json_from_db(value: Any) -> Any:
     return value
 
 
+def _json_object_from_db(value: Any) -> dict[str, Any]:
+    data = _json_from_db(value)
+    return data if isinstance(data, dict) else {}
+
+
 def _to_cent(amount_cny: str) -> int:
     try:
         amount = Decimal(str(amount_cny))
@@ -72,7 +77,15 @@ class GroupBuyRepository:
             "description": row["description"],
             "status": row["status"],
             "ownerUserId": row["owner_user_id"],
+            "startAt": _iso_or_none(row.get("start_at")),
             "closeAt": _iso_or_none(row["close_at"]),
+            "coverFileObjectId": row.get("cover_file_object_id"),
+            "coverImageUrl": row.get("cover_image_url"),
+            "claimMode": row.get("claim_mode"),
+            "canCancelClaim": bool(row.get("can_cancel_claim")),
+            "saleMode": row.get("sale_mode"),
+            "allowTransfer": row.get("allow_transfer") if row.get("allow_transfer") is not None else True,
+            "advancedSettings": _json_object_from_db(row.get("advanced_settings")),
             "paymentChannelId": row["payment_channel_id"],
             "warehouseUserId": row["warehouse_user_id"],
             "createdAt": _iso_or_none(row["created_at"]),
@@ -310,11 +323,20 @@ class GroupBuyRepository:
         description: str | None,
         status: str,
         owner_user_id: str,
-        close_at: datetime | None,
-        payment_channel_id: str | None,
-        warehouse_user_id: str | None,
+        start_at: datetime | None = None,
+        close_at: datetime | None = None,
+        cover_file_object_id: str | None = None,
+        cover_image_url: str | None = None,
+        claim_mode: str | None = None,
+        can_cancel_claim: bool = False,
+        sale_mode: str | None = None,
+        allow_transfer: bool = True,
+        advanced_settings: dict[str, Any] | None = None,
+        payment_channel_id: str | None = None,
+        warehouse_user_id: str | None = None,
     ) -> dict[str, Any]:
         group_buy_id = f"gb_{secrets.token_hex(8)}"
+        advanced_settings = advanced_settings or {}
         with conn.cursor(row_factory=self._dict_row()) as cur:
             cur.execute(
                 """
@@ -326,11 +348,22 @@ class GroupBuyRepository:
                   description,
                   status,
                   owner_user_id,
+                  start_at,
                   close_at,
+                  cover_file_object_id,
+                  cover_image_url,
+                  claim_mode,
+                  can_cancel_claim,
+                  sale_mode,
+                  allow_transfer,
+                  advanced_settings,
                   payment_channel_id,
                   warehouse_user_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s
+                )
                 RETURNING *
                 """,
                 (
@@ -341,7 +374,15 @@ class GroupBuyRepository:
                     description,
                     status,
                     owner_user_id,
+                    start_at,
                     close_at,
+                    cover_file_object_id,
+                    cover_image_url,
+                    claim_mode,
+                    can_cancel_claim,
+                    sale_mode,
+                    allow_transfer,
+                    json.dumps(advanced_settings, ensure_ascii=False),
                     payment_channel_id,
                     warehouse_user_id,
                 ),
@@ -357,10 +398,19 @@ class GroupBuyRepository:
         type_: str,
         title: str,
         description: str | None,
-        close_at: datetime | None,
-        payment_channel_id: str | None,
-        warehouse_user_id: str | None,
+        start_at: datetime | None = None,
+        close_at: datetime | None = None,
+        cover_file_object_id: str | None = None,
+        cover_image_url: str | None = None,
+        claim_mode: str | None = None,
+        can_cancel_claim: bool = False,
+        sale_mode: str | None = None,
+        allow_transfer: bool = True,
+        advanced_settings: dict[str, Any] | None = None,
+        payment_channel_id: str | None = None,
+        warehouse_user_id: str | None = None,
     ) -> dict[str, Any]:
+        advanced_settings = advanced_settings or {}
         with conn.cursor(row_factory=self._dict_row()) as cur:
             cur.execute(
                 """
@@ -368,7 +418,15 @@ class GroupBuyRepository:
                 SET type = %s,
                     title = %s,
                     description = %s,
+                    start_at = %s,
                     close_at = %s,
+                    cover_file_object_id = %s,
+                    cover_image_url = %s,
+                    claim_mode = %s,
+                    can_cancel_claim = %s,
+                    sale_mode = %s,
+                    allow_transfer = %s,
+                    advanced_settings = %s::jsonb,
                     payment_channel_id = %s,
                     warehouse_user_id = %s,
                     updated_at = NOW()
@@ -379,7 +437,15 @@ class GroupBuyRepository:
                     type_,
                     title,
                     description,
+                    start_at,
                     close_at,
+                    cover_file_object_id,
+                    cover_image_url,
+                    claim_mode,
+                    can_cancel_claim,
+                    sale_mode,
+                    allow_transfer,
+                    json.dumps(advanced_settings, ensure_ascii=False),
                     payment_channel_id,
                     warehouse_user_id,
                     group_buy_id,
@@ -493,6 +559,17 @@ class GroupBuyRepository:
             )
             row = cur.fetchone()
         return self._build_group_buy_item_snapshot(row)
+
+    def delete_group_buy_item(self, conn, group_buy_item_id: str) -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM group_buy_items
+                WHERE id = %s
+                """,
+                (group_buy_item_id,),
+            )
+            return cur.rowcount > 0
 
     def update_group_buy_item(
         self,

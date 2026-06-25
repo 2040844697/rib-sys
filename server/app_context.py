@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 from .auth import AuthModule, ensure_identity_seed, has_permission, has_role
@@ -286,6 +287,138 @@ class AppContext:
         from psycopg.rows import dict_row
 
         return dict_row
+
+    def _to_iso(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat().replace("+00:00", "Z")
+        return str(value)
+
+    def _cent_to_cny(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        cents = int(value)
+        sign = "-" if cents < 0 else ""
+        cents = abs(cents)
+        return f"{sign}{cents // 100}.{cents % 100:02d}"
+
+    def _optional_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise AppError(400, "字段格式不正确", "VALIDATION_FAILED")
+        normalized = value.strip()
+        return normalized or None
+
+    def _required_text(self, value: Any, field_name: str, min_length: int = 1) -> str:
+        normalized = value.strip() if isinstance(value, str) else ""
+        if len(normalized) < min_length:
+            raise AppError(400, f"{field_name}填写不完整", "VALIDATION_FAILED")
+        return normalized
+
+    def _build_address(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "userId": row["user_id"],
+            "receiverName": row["receiver_name"],
+            "receiverPhone": row["receiver_phone"],
+            "province": row.get("province"),
+            "city": row.get("city"),
+            "district": row.get("district"),
+            "detailAddress": row["detail_address"],
+            "postalCode": row.get("postal_code"),
+            "isDefault": bool(row.get("is_default")),
+            "note": row.get("note"),
+            "createdAt": self._to_iso(row.get("created_at")),
+            "updatedAt": self._to_iso(row.get("updated_at")),
+        }
+
+    def _infer_dispatch_warehouse_user_id(self, payload: dict[str, Any]) -> str:
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise AppError(400, "items格式不正确", "VALIDATION_FAILED")
+        stock_item_ids: list[str] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise AppError(400, "items格式不正确", "VALIDATION_FAILED")
+            stock_item_id = item.get("stockItemId") or item.get("stock_item_id")
+            if not isinstance(stock_item_id, str) or not stock_item_id.strip():
+                raise AppError(400, "items.stockItemId填写不完整", "VALIDATION_FAILED")
+            stock_item_ids.append(stock_item_id.strip())
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT warehouse_user_id
+                    FROM stock_items
+                    WHERE id = ANY(%s)
+                    """,
+                    (stock_item_ids,),
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        if len(rows) != 1:
+            raise AppError(400, "排发申请不能混合多个囤货人", "VALIDATION_FAILED")
+        return rows[0]["warehouse_user_id"]
+
+    def _list_charges_for_user(self, user_id: str) -> dict[str, Any]:
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      c.*,
+                      payer.display_name AS payer_name,
+                      payee.display_name AS payee_name,
+                      submitted.id AS submitted_proof_id,
+                      submitted.status AS submitted_proof_status,
+                      submitted.proof_image_url AS submitted_proof_image_url,
+                      confirmed.id AS confirmed_proof_id,
+                      confirmed.status AS confirmed_proof_status
+                    FROM charges c
+                    JOIN users payer ON payer.id = c.payer_user_id
+                    JOIN users payee ON payee.id = c.payee_user_id
+                    LEFT JOIN payment_proofs submitted ON submitted.id = c.submitted_proof_id
+                    LEFT JOIN payment_proofs confirmed ON confirmed.id = c.confirmed_proof_id
+                    WHERE c.payer_user_id = %s
+                       OR c.payee_user_id = %s
+                    ORDER BY c.created_at DESC, c.id DESC
+                    """,
+                    (user_id, user_id),
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "type": row["type"],
+                "payerUserId": row["payer_user_id"],
+                "payerName": row.get("payer_name"),
+                "payeeUserId": row["payee_user_id"],
+                "payeeName": row.get("payee_name"),
+                "bizType": row["biz_type"],
+                "bizId": row["biz_id"],
+                "amountCny": self._cent_to_cny(row["amount_cny"]),
+                "status": row["status"],
+                "paymentChannelId": row.get("payment_channel_id"),
+                "snapshot": row.get("snapshot_json") or {},
+                "note": row.get("note"),
+                "submittedProofId": row.get("submitted_proof_id"),
+                "submittedProofStatus": row.get("submitted_proof_status"),
+                "submittedProofImageUrl": row.get("submitted_proof_image_url"),
+                "confirmedProofId": row.get("confirmed_proof_id"),
+                "confirmedProofStatus": row.get("confirmed_proof_status"),
+                "cancelledReason": row.get("cancelled_reason"),
+                "createdAt": self._to_iso(row.get("created_at")),
+                "updatedAt": self._to_iso(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
 
     def _get_visible_group(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
         with connect(self.config, row_factory=self._dict_row()) as conn:
@@ -587,6 +720,12 @@ class AppContext:
             payload,
         )
 
+    def delete_group_buy_item(self, user: dict[str, Any], group_buy_item_id: str) -> dict[str, Any]:
+        return self._require_group_buy_management_module().delete_group_buy_item(
+            user["id"],
+            group_buy_item_id,
+        )
+
     def claim_group_buy_item(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         # 成员认领走 DB 版拼单记录模块，事务内扣库存、写记录、生成首款费用。
         return self._require_group_buy_records_module().create_record_for_user(user["id"], payload)
@@ -634,13 +773,68 @@ class AppContext:
 
     def list_dispatchable_items(self, user: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
         # 查询可排发库存入口，数据从 stock_items 和 group_buy_records 推导。
-        return self._require_warehouse_dispatch_module().list_dispatchable_items(
+        result = self._require_warehouse_dispatch_module().list_dispatchable_items(
             filters,
             actor_user_id=user["id"],
         )
+        stock_item_ids = [item["stockItemId"] for item in result.get("items", [])]
+        if not stock_item_ids:
+            return result
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      si.id AS stock_item_id,
+                      gb.id AS group_buy_id,
+                      gb.title AS group_buy_title,
+                      gb.type AS group_buy_type,
+                      gbi.id AS group_buy_item_id,
+                      gbi.name_snapshot AS item_name,
+                      gbi.image_url_snapshot AS item_image_url,
+                      warehouse.display_name AS warehouse_name
+                    FROM stock_items si
+                    JOIN group_buy_records r ON r.id = si.group_buy_record_id
+                    JOIN group_buys gb ON gb.id = r.group_buy_id
+                    JOIN group_buy_items gbi ON gbi.id = r.group_buy_item_id
+                    JOIN users warehouse ON warehouse.id = si.warehouse_user_id
+                    WHERE si.id = ANY(%s)
+                    """,
+                    (stock_item_ids,),
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        extra_by_stock_item_id = {row["stock_item_id"]: row for row in rows}
+        result["items"] = [
+            {
+                **item,
+                "groupBuy": {
+                    "id": extra_by_stock_item_id.get(item["stockItemId"], {}).get("group_buy_id")
+                    or item.get("groupBuyId"),
+                    "title": extra_by_stock_item_id.get(item["stockItemId"], {}).get("group_buy_title"),
+                    "type": extra_by_stock_item_id.get(item["stockItemId"], {}).get("group_buy_type"),
+                },
+                "item": {
+                    "id": extra_by_stock_item_id.get(item["stockItemId"], {}).get("group_buy_item_id")
+                    or item.get("groupBuyItemId"),
+                    "name": extra_by_stock_item_id.get(item["stockItemId"], {}).get("item_name"),
+                    "imageUrl": extra_by_stock_item_id.get(item["stockItemId"], {}).get("item_image_url"),
+                },
+                "warehouseUser": {
+                    "id": item.get("warehouseUserId"),
+                    "displayName": extra_by_stock_item_id.get(item["stockItemId"], {}).get("warehouse_name"),
+                },
+            }
+            for item in result.get("items", [])
+        ]
+        return result
 
     def create_dispatch_request(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         # 创建排发申请入口，写 dispatch_requests 和 dispatch_items。
+        if not (payload.get("warehouseUserId") or payload.get("warehouse_user_id")):
+            payload = {**payload, "warehouseUserId": self._infer_dispatch_warehouse_user_id(payload)}
         return self._require_warehouse_dispatch_module().create_dispatch_request(
             payload,
             actor_user_id=user["id"],
@@ -805,6 +999,25 @@ class AppContext:
             size_bytes=payload.get("sizeBytes"),
         )
 
+    def create_uploaded_file_object(
+        self,
+        user: dict[str, Any],
+        *,
+        bucket: str,
+        object_key: str,
+        url: str,
+        content_type: str | None,
+        size_bytes: int,
+    ) -> dict[str, Any]:
+        return self.file_service.create_upload_object(
+            uploaded_by=user["id"],
+            bucket=bucket,
+            object_key=object_key,
+            url=url,
+            content_type=content_type,
+            size_bytes=size_bytes,
+        )
+
     def void_file_object(
         self,
         user: dict[str, Any],
@@ -825,8 +1038,178 @@ class AppContext:
             raise RuntimeError("Charge/payment database module requires DATABASE_URL.")
         return self.charge_payment_module
 
+    def list_my_records(self, user: dict[str, Any]) -> dict[str, Any]:
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      r.*,
+                      gb.title AS group_buy_title,
+                      gb.type AS group_buy_type,
+                      gb.status AS group_buy_status,
+                      gbi.name_snapshot AS item_name,
+                      gbi.image_url_snapshot AS item_image_url,
+                      gbi.unit_price_cny AS item_unit_price_cny,
+                      gbi.character_names_snapshot AS item_character_names,
+                      goods_charge.status AS goods_charge_status,
+                      goods_charge.amount_cny AS goods_charge_amount_cny,
+                      intl_charge.status AS international_charge_status,
+                      intl_charge.amount_cny AS international_charge_amount_cny,
+                      domestic_charge.status AS domestic_charge_status,
+                      domestic_charge.amount_cny AS domestic_charge_amount_cny,
+                      dr.status AS dispatch_status,
+                      t.status AS transfer_status
+                    FROM group_buy_records r
+                    JOIN group_buys gb ON gb.id = r.group_buy_id
+                    JOIN group_buy_items gbi ON gbi.id = r.group_buy_item_id
+                    LEFT JOIN charges goods_charge ON goods_charge.id = r.goods_charge_id
+                    LEFT JOIN charges intl_charge ON intl_charge.id = r.international_charge_id
+                    LEFT JOIN charges domestic_charge ON domestic_charge.id = r.domestic_shipping_charge_id
+                    LEFT JOIN dispatch_requests dr ON dr.id = r.dispatch_request_id
+                    LEFT JOIN transfers t ON t.id = r.transfer_id
+                    WHERE r.member_user_id = %s
+                    ORDER BY r.created_at DESC, r.id DESC
+                    """,
+                    (user["id"],),
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = []
+        for row in rows:
+            character_names = row.get("item_character_names") or []
+            items.append(
+                {
+                    "id": row["id"],
+                    "groupBuyId": row["group_buy_id"],
+                    "groupBuyTitle": row["group_buy_title"],
+                    "groupBuyType": row["group_buy_type"],
+                    "groupBuyStatus": row["group_buy_status"],
+                    "groupBuyItemId": row["group_buy_item_id"],
+                    "itemName": row["item_name"],
+                    "itemImageUrl": row.get("item_image_url"),
+                    "characterNames": character_names,
+                    "quantity": row["quantity"],
+                    "unitPriceCny": self._cent_to_cny(row.get("item_unit_price_cny")),
+                    "status": row["status"],
+                    "displayStatus": row["status"],
+                    "isException": bool(row.get("is_exception")),
+                    "exceptionReason": row.get("exception_reason"),
+                    "charges": {
+                        "goods": {
+                            "id": row.get("goods_charge_id"),
+                            "status": row.get("goods_charge_status"),
+                            "amountCny": self._cent_to_cny(row.get("goods_charge_amount_cny")),
+                        }
+                        if row.get("goods_charge_id")
+                        else None,
+                        "international": {
+                            "id": row.get("international_charge_id"),
+                            "status": row.get("international_charge_status"),
+                            "amountCny": self._cent_to_cny(row.get("international_charge_amount_cny")),
+                        }
+                        if row.get("international_charge_id")
+                        else None,
+                        "domesticShipping": {
+                            "id": row.get("domestic_shipping_charge_id"),
+                            "status": row.get("domestic_charge_status"),
+                            "amountCny": self._cent_to_cny(row.get("domestic_charge_amount_cny")),
+                        }
+                        if row.get("domestic_shipping_charge_id")
+                        else None,
+                    },
+                    "dispatchRequestId": row.get("dispatch_request_id"),
+                    "dispatchStatus": row.get("dispatch_status"),
+                    "transferId": row.get("transfer_id"),
+                    "transferStatus": row.get("transfer_status"),
+                    "createdAt": self._to_iso(row.get("created_at")),
+                    "updatedAt": self._to_iso(row.get("updated_at")),
+                }
+            )
+        return {"items": items, "total": len(items)}
+
+    def list_my_charges(self, user: dict[str, Any]) -> dict[str, Any]:
+        return self._list_charges_for_user(user["id"])
+
+    def submit_charge_payment_proof(
+        self,
+        user: dict[str, Any],
+        charge_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        charge = self._require_charge_payment_module().require_charge(charge_id)
+        if charge["payerUserId"] != user["id"] and not has_permission(user, "charge:adjust"):
+            raise AppError(403, "当前账号不能为这笔费用上传付款凭证", "FORBIDDEN")
+        normalized_payload = {
+            **payload,
+            "submittedBy": payload.get("submittedBy") or user["id"],
+            "fromUserId": payload.get("fromUserId") or charge["payerUserId"],
+            "toUserId": payload.get("toUserId") or charge["payeeUserId"],
+            "amountCny": payload.get("amountCny") or charge["amountCny"],
+            "allocations": payload.get("allocations")
+            or [
+                {
+                    "chargeId": charge_id,
+                    "allocatedAmountCny": payload.get("amountCny") or charge["amountCny"],
+                }
+            ],
+        }
+        return self.submit_payment_proof(user, normalized_payload)
+
+    def list_payment_channels(self, user: dict[str, Any]) -> dict[str, Any]:
+        conditions = ["pc.status = 'active'"]
+        params: list[Any] = []
+        if not has_permission(user, "charge:view_group"):
+            conditions.append("pc.owner_user_id = %s")
+            params.append(user["id"])
+        elif "admin" not in user.get("roles", []):
+            conditions.append("(pc.owner_user_id = %s OR owner.group_id = %s)")
+            params.extend([user["id"], user["groupId"]])
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      pc.*,
+                      owner.display_name AS owner_display_name,
+                      owner.group_nickname AS owner_group_nickname
+                    FROM payment_channels pc
+                    JOIN users owner ON owner.id = pc.owner_user_id
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY pc.created_at DESC, pc.id DESC
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "ownerUserId": row["owner_user_id"],
+                "ownerName": row.get("owner_display_name") or row.get("owner_group_nickname"),
+                "type": row["type"],
+                "displayName": row["display_name"],
+                "qrFileObjectId": row.get("qr_file_object_id"),
+                "qrImageUrl": row.get("qr_image_url"),
+                "accountText": row.get("account_text"),
+                "note": row.get("note"),
+                "status": row["status"],
+                "createdAt": self._to_iso(row.get("created_at")),
+                "updatedAt": self._to_iso(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
+
     def create_payment_channel(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        return self._require_charge_payment_module().create_payment_channel(user["id"], payload)
+        normalized_payload = {
+            **payload,
+            "ownerUserId": payload.get("ownerUserId") or payload.get("owner_user_id") or user["id"],
+        }
+        return self._require_charge_payment_module().create_payment_channel(user["id"], normalized_payload)
 
     def create_charge(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         if not has_permission(user, "charge:adjust"):
@@ -871,6 +1254,367 @@ class AppContext:
     def request_transfer(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         # 杞崟鐢宠鐢?transfer_exception 妯″潡鍐呯殑 DB workflow 澶勭悊銆?
         return self._require_transfer_exception_module().request_transfer(user, payload)
+
+    def list_dispatch_requests(self, user: dict[str, Any]) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if "admin" in user.get("roles", []):
+            pass
+        elif has_permission(user, "dispatch:process_assigned"):
+            conditions.append("dr.warehouse_user_id = %s")
+            params.append(user["id"])
+        else:
+            conditions.append("dr.requester_user_id = %s")
+            params.append(user["id"])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      dr.*,
+                      requester.display_name AS requester_name,
+                      warehouse.display_name AS warehouse_name,
+                      COUNT(di.id) AS item_count,
+                      COALESCE(SUM(di.quantity), 0) AS total_quantity
+                    FROM dispatch_requests dr
+                    JOIN users requester ON requester.id = dr.requester_user_id
+                    JOIN users warehouse ON warehouse.id = dr.warehouse_user_id
+                    LEFT JOIN dispatch_items di ON di.dispatch_request_id = dr.id
+                    {where_sql}
+                    GROUP BY dr.id, requester.display_name, warehouse.display_name
+                    ORDER BY dr.created_at DESC, dr.id DESC
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "requesterUserId": row["requester_user_id"],
+                "requesterName": row.get("requester_name"),
+                "warehouseUserId": row["warehouse_user_id"],
+                "warehouseName": row.get("warehouse_name"),
+                "status": row["status"],
+                "receiverName": row["receiver_name"],
+                "receiverPhone": row["receiver_phone"],
+                "receiverAddress": row["receiver_address"],
+                "itemCount": int(row.get("item_count") or 0),
+                "totalQuantity": int(row.get("total_quantity") or 0),
+                "shippingFeeCny": self._cent_to_cny(row.get("shipping_fee_cny")),
+                "feeMode": row.get("fee_mode"),
+                "domesticChargeId": row.get("domestic_charge_id"),
+                "submittedAt": self._to_iso(row.get("submitted_at")),
+                "packedAt": self._to_iso(row.get("packed_at")),
+                "shippedAt": self._to_iso(row.get("shipped_at")),
+                "completedAt": self._to_iso(row.get("completed_at")),
+                "createdAt": self._to_iso(row.get("created_at")),
+                "updatedAt": self._to_iso(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
+
+    def list_transfers(self, user: dict[str, Any]) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if not has_permission(user, "record:create_for_member"):
+            conditions.append("(t.from_user_id = %s OR t.to_user_id = %s OR t.requested_by = %s)")
+            params.extend([user["id"], user["id"], user["id"]])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      t.*,
+                      from_user.display_name AS from_user_name,
+                      to_user.display_name AS to_user_name,
+                      requester.display_name AS requested_by_name,
+                      COUNT(ti.id) AS item_count,
+                      COALESCE(SUM(ti.quantity), 0) AS total_quantity
+                    FROM transfers t
+                    JOIN users from_user ON from_user.id = t.from_user_id
+                    JOIN users to_user ON to_user.id = t.to_user_id
+                    JOIN users requester ON requester.id = t.requested_by
+                    LEFT JOIN transfer_items ti ON ti.transfer_id = t.id
+                    {where_sql}
+                    GROUP BY t.id, from_user.display_name, to_user.display_name, requester.display_name
+                    ORDER BY t.created_at DESC, t.id DESC
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "fromUserId": row["from_user_id"],
+                "fromUserName": row.get("from_user_name"),
+                "toUserId": row["to_user_id"],
+                "toUserName": row.get("to_user_name"),
+                "requestedBy": row["requested_by"],
+                "requestedByName": row.get("requested_by_name"),
+                "status": row["status"],
+                "reason": row.get("reason"),
+                "rejectReason": row.get("reject_reason"),
+                "itemCount": int(row.get("item_count") or 0),
+                "totalQuantity": int(row.get("total_quantity") or 0),
+                "createdAt": self._to_iso(row.get("created_at")),
+                "updatedAt": self._to_iso(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
+
+    def list_exceptions(self, user: dict[str, Any]) -> dict[str, Any]:
+        if not has_permission(user, "record:mark_exception") and not has_permission(user, "audit:view"):
+            raise AppError(403, "当前账号没有查看异常的权限", "FORBIDDEN")
+
+        conditions = ["r.is_exception = TRUE"]
+        params: list[Any] = []
+        if "admin" not in user.get("roles", []):
+            conditions.append("gb.group_id = %s")
+            params.append(user["groupId"])
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      r.*,
+                      gb.title AS group_buy_title,
+                      gbi.name_snapshot AS item_name,
+                      member.display_name AS member_name
+                    FROM group_buy_records r
+                    JOIN group_buys gb ON gb.id = r.group_buy_id
+                    JOIN group_buy_items gbi ON gbi.id = r.group_buy_item_id
+                    JOIN users member ON member.id = r.member_user_id
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY r.updated_at DESC, r.id DESC
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "groupBuyRecordId": row["id"],
+                "groupBuyId": row["group_buy_id"],
+                "groupBuyTitle": row.get("group_buy_title"),
+                "groupBuyItemId": row["group_buy_item_id"],
+                "itemName": row.get("item_name"),
+                "memberUserId": row["member_user_id"],
+                "memberName": row.get("member_name"),
+                "quantity": row["quantity"],
+                "status": row["status"],
+                "exceptionReason": row.get("exception_reason"),
+                "note": row.get("note"),
+                "createdAt": self._to_iso(row.get("created_at")),
+                "updatedAt": self._to_iso(row.get("updated_at")),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
+
+    def list_users(self, user: dict[str, Any]) -> dict[str, Any]:
+        if not has_permission(user, "user:manage"):
+            raise AppError(403, "当前账号没有查看用户列表的权限", "FORBIDDEN")
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT u.*, g.name AS group_name
+                    FROM users u
+                    JOIN groups g ON g.id = u.group_id
+                    ORDER BY u.created_at DESC, u.id DESC
+                    """
+                )
+                rows = cur.fetchall()
+            items = []
+            for row in rows:
+                roles = self.auth.repo.list_roles(conn, row["id"])
+                items.append(
+                    {
+                        "id": row["id"],
+                        "groupId": row["group_id"],
+                        "groupName": row.get("group_name"),
+                        "account": row["account"],
+                        "displayName": row["display_name"],
+                        "qqNumber": row["qq_number"],
+                        "groupNickname": row["group_nickname"],
+                        "roles": roles,
+                        "status": row["status"],
+                        "lastLoginAt": self._to_iso(row.get("last_login_at")),
+                        "createdAt": self._to_iso(row.get("created_at")),
+                        "updatedAt": self._to_iso(row.get("updated_at")),
+                    }
+                )
+            conn.rollback()
+        return {"items": items, "total": len(items)}
+
+    def update_user(self, actor: dict[str, Any], user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not has_permission(actor, "user:manage"):
+            raise AppError(403, "当前账号没有管理用户的权限", "FORBIDDEN")
+
+        allowed_roles = {"member", "group_buy_maintainer", "stock_keeper", "admin"}
+        with connect(self.config) as conn:
+            before = self.auth.repo.get_user_by_id(conn, user_id)
+            if before is None:
+                raise AppError(404, "用户不存在", "NOT_FOUND")
+
+            updates = {
+                "display_name": payload.get("displayName", before["displayName"]),
+                "qq_number": payload.get("qqNumber", before["qqNumber"]),
+                "group_nickname": payload.get("groupNickname", before["groupNickname"]),
+                "status": payload.get("status", before["status"]),
+            }
+            roles_value = payload.get("roles", before["roles"])
+            if not isinstance(roles_value, list) or not roles_value:
+                raise AppError(400, "roles格式不正确", "VALIDATION_FAILED")
+            roles = []
+            for role in roles_value:
+                if role not in allowed_roles:
+                    raise AppError(400, "roles包含不支持的角色", "VALIDATION_FAILED")
+                if role not in roles:
+                    roles.append(role)
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET display_name = %s,
+                        qq_number = %s,
+                        group_nickname = %s,
+                        status = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        updates["display_name"],
+                        updates["qq_number"],
+                        updates["group_nickname"],
+                        updates["status"],
+                        user_id,
+                    ),
+                )
+                cur.execute("DELETE FROM user_roles WHERE user_id = %s", (user_id,))
+                for role in roles:
+                    cur.execute(
+                        """
+                        INSERT INTO user_roles (id, user_id, role)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (f"role_{secrets.token_hex(8)}", user_id, role),
+                    )
+            after = self.auth.repo.get_user_by_id(conn, user_id)
+            self.audit_service.log_in_connection(
+                conn,
+                actor_user_id=actor["id"],
+                action="user.admin_update",
+                object_type="user",
+                object_id=user_id,
+                before=before,
+                after=after,
+                reason=payload.get("reason") or "管理员更新用户",
+            )
+            conn.commit()
+        return {"userId": user_id, "user": after}
+
+    def list_my_addresses(self, user: dict[str, Any]) -> dict[str, Any]:
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM user_addresses
+                    WHERE user_id = %s
+                    ORDER BY is_default DESC, created_at DESC, id DESC
+                    """,
+                    (user["id"],),
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+        items = [self._build_address(row) for row in rows]
+        return {"items": items, "total": len(items)}
+
+    def create_my_address(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        receiver_name = self._required_text(payload.get("receiverName") or payload.get("receiver_name"), "receiverName", 2)
+        receiver_phone = self._required_text(payload.get("receiverPhone") or payload.get("receiver_phone"), "receiverPhone", 6)
+        detail_address = self._required_text(
+            payload.get("detailAddress")
+            or payload.get("detail_address")
+            or payload.get("receiverAddress")
+            or payload.get("receiver_address")
+            or payload.get("address"),
+            "detailAddress",
+            4,
+        )
+        province = self._optional_text(payload.get("province"))
+        city = self._optional_text(payload.get("city"))
+        district = self._optional_text(payload.get("district"))
+        postal_code = self._optional_text(payload.get("postalCode") or payload.get("postal_code"))
+        note = self._optional_text(payload.get("note"))
+        is_default = bool(payload.get("isDefault") or payload.get("is_default"))
+        address_id = f"address_{secrets.token_hex(8)}"
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                if is_default:
+                    cur.execute(
+                        """
+                        UPDATE user_addresses
+                        SET is_default = FALSE,
+                            updated_at = NOW()
+                        WHERE user_id = %s
+                        """,
+                        (user["id"],),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO user_addresses (
+                      id,
+                      user_id,
+                      receiver_name,
+                      receiver_phone,
+                      province,
+                      city,
+                      district,
+                      detail_address,
+                      postal_code,
+                      is_default,
+                      note,
+                      created_at,
+                      updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    RETURNING *
+                    """,
+                    (
+                        address_id,
+                        user["id"],
+                        receiver_name,
+                        receiver_phone,
+                        province,
+                        city,
+                        district,
+                        detail_address,
+                        postal_code,
+                        is_default,
+                        note,
+                    ),
+                )
+                address = self._build_address(cur.fetchone())
+            conn.commit()
+        return {"addressId": address_id, "address": address}
 
     def approve_transfer(
         self,

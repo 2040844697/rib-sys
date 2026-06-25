@@ -182,6 +182,8 @@ class DatabaseFileService:
         return {
             "fileObjectId": file_object["id"],
             "url": file_object["url"],
+            "bucket": file_object["bucket"],
+            "objectKey": file_object["objectKey"],
             "fileObject": file_object,
         }
 

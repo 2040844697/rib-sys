@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
+import secrets
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +28,8 @@ else:
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG = load_config(ROOT_DIR)
+UPLOAD_ROOT = ROOT_DIR / "public" / "uploads"
+ALLOWED_UPLOAD_BUCKETS = {"goods", "payments", "orders", "channels", "misc"}
 
 
 def _initialize_database_bootstrap():
@@ -70,7 +74,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             "Access-Control-Allow-Headers",
             "Accept, Content-Type, X-Session-Token, X-Mock-Session",
         )
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -82,7 +86,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             "Access-Control-Allow-Headers",
             "Accept, Content-Type, X-Session-Token, X-Mock-Session",
         )
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.end_headers()
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -97,6 +101,73 @@ class ApiHandler(BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise AppError(400, "请求体不是合法 JSON", "INVALID_JSON") from exc
+
+    def _read_upload_body(self, current_user: dict[str, Any]) -> dict[str, Any]:
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("application/json"):
+            return APP_CONTEXT.create_upload_object(current_user, self._read_json_body())
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            raise AppError(400, "上传文件不能为空", "VALIDATION_FAILED")
+        if content_length > 10 * 1024 * 1024:
+            raise AppError(413, "上传文件过大", "PAYLOAD_TOO_LARGE")
+
+        bucket = "misc"
+        filename = "upload.bin"
+        file_content_type = self.headers.get("X-Upload-Content-Type")
+        raw = b""
+
+        if content_type.startswith("multipart/form-data"):
+            import cgi
+
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": content_type,
+                    "CONTENT_LENGTH": str(content_length),
+                },
+            )
+            bucket_field = form["bucket"] if "bucket" in form else None
+            if bucket_field is not None and not bucket_field.filename:
+                bucket = str(bucket_field.value or "misc")
+            file_field = form["file"] if "file" in form else None
+            if file_field is None or not file_field.filename:
+                raise AppError(400, "multipart 请求需要包含 file 字段", "VALIDATION_FAILED")
+            filename = Path(file_field.filename).name or filename
+            file_content_type = file_field.type or file_content_type
+            raw = file_field.file.read()
+        else:
+            bucket = self.headers.get("X-Upload-Bucket") or "misc"
+            filename = self.headers.get("X-Upload-Filename") or filename
+            filename = Path(filename).name
+            raw = self.rfile.read(content_length)
+
+        if not raw:
+            raise AppError(400, "上传文件不能为空", "VALIDATION_FAILED")
+        if bucket not in ALLOWED_UPLOAD_BUCKETS:
+            raise AppError(400, "bucket 不在允许范围内", "VALIDATION_FAILED")
+
+        suffix = Path(filename).suffix
+        if not file_content_type:
+            file_content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        safe_user_id = re.sub(r"[^A-Za-z0-9_.-]", "_", current_user["id"])
+        object_key = f"{safe_user_id}/{secrets.token_hex(12)}{suffix}"
+        target_path = UPLOAD_ROOT / bucket / object_key
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(raw)
+        url = "/uploads/" + "/".join([bucket, *object_key.split("/")])
+
+        return APP_CONTEXT.create_uploaded_file_object(
+            current_user,
+            bucket=bucket,
+            object_key=object_key,
+            url=url,
+            content_type=file_content_type,
+            size_bytes=len(raw),
+        )
 
     def _require_user(self) -> dict[str, Any]:
         session_token = read_session_token(self.headers)
@@ -121,6 +192,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def do_PATCH(self) -> None:
+        self._dispatch()
+
+    def do_DELETE(self) -> None:
         self._dispatch()
 
     def _dispatch(self) -> None:
@@ -186,6 +260,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 current_user = self._require_user()
                 result = APP_CONTEXT.build_bootstrap(current_user)
                 self._write_json(HTTPStatus.OK, result)
+                return
+
+            if self.command == "GET" and path == "/api/app/me/records":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_my_records(self._require_user()))
                 return
 
             if self.command == "GET" and path == "/api/app/groups":
@@ -288,6 +366,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            match = re.fullmatch(r"/api/group-buy-items/([^/]+)", path)
+            if self.command == "DELETE" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.delete_group_buy_item(
+                        self._require_user(),
+                        match.group(1),
+                    ),
+                )
+                return
+
             if self.command == "POST" and path == "/api/group-buy-items/release-stock":
                 self._write_json(
                     HTTPStatus.OK,
@@ -382,6 +471,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     APP_CONTEXT.create_upload_object(self._require_user(), self._read_json_body()),
                 )
+                return
+
+            if self.command == "POST" and path == "/api/file-uploads":
+                current_user = self._require_user()
+                self._write_json(HTTPStatus.OK, self._read_upload_body(current_user))
                 return
 
             match = re.fullmatch(r"/api/file-objects/([^/]+)/void", path)
@@ -498,6 +592,134 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_body()
                 result = APP_CONTEXT.update_me(current_user, payload)
                 self._write_json(HTTPStatus.OK, result)
+                return
+
+            if self.command == "GET" and path == "/api/my/charges":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_my_charges(self._require_user()))
+                return
+
+            match = re.fullmatch(r"/api/charges/([^/]+)/payment-proofs", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.submit_charge_payment_proof(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/payment-channels":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.list_payment_channels(self._require_user()),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/payment-channels":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.create_payment_channel(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/my/dispatchable-items":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.list_dispatchable_items(
+                        self._require_user(),
+                        {
+                            "memberUserId": query.get("member_user_id", [None])[0]
+                            or query.get("memberUserId", [None])[0],
+                            "warehouseUserId": query.get("warehouse_user_id", [None])[0]
+                            or query.get("warehouseUserId", [None])[0],
+                            "page": query.get("page", [None])[0],
+                            "pageSize": query.get("page_size", [None])[0]
+                            or query.get("pageSize", [None])[0],
+                        },
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/dispatch-requests":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.list_dispatch_requests(self._require_user()),
+                )
+                return
+
+            if self.command == "POST" and path == "/api/dispatch-requests":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.create_dispatch_request(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/transfers":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_transfers(self._require_user()))
+                return
+
+            if self.command == "POST" and path == "/api/transfers":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.request_transfer(self._require_user(), self._read_json_body()),
+                )
+                return
+
+            match = re.fullmatch(r"/api/transfers/([^/]+)/approve", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.approve_transfer(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            match = re.fullmatch(r"/api/transfers/([^/]+)/reject", path)
+            if self.command == "POST" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.reject_transfer(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/exceptions":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_exceptions(self._require_user()))
+                return
+
+            if self.command == "GET" and path == "/api/users":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_users(self._require_user()))
+                return
+
+            match = re.fullmatch(r"/api/users/([^/]+)", path)
+            if self.command == "PATCH" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.update_user(
+                        self._require_user(),
+                        match.group(1),
+                        self._read_json_body(),
+                    ),
+                )
+                return
+
+            if self.command == "GET" and path == "/api/me/addresses":
+                self._write_json(HTTPStatus.OK, APP_CONTEXT.list_my_addresses(self._require_user()))
+                return
+
+            if self.command == "POST" and path == "/api/me/addresses":
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.create_my_address(self._require_user(), self._read_json_body()),
+                )
                 return
 
             raise AppError(404, "接口不存在", "NOT_FOUND")
