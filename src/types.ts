@@ -56,6 +56,14 @@ export interface UploadedImageRef {
   name?: string;
 }
 
+export interface MemberSummary {
+  id: string;
+  groupId?: string;
+  displayName: string;
+  groupNickname?: string | null;
+  qqNumber?: string | null;
+}
+
 export interface BootstrapResponse {
   currentUser: CurrentUser;
   defaultGroupId: string;
@@ -240,6 +248,12 @@ export interface ClaimGroupBuyPayload {
   groupBuyId: string;
   groupBuyItemId: string;
   quantity: number;
+}
+
+export interface InitialGroupBuyRecordPayload {
+  memberUserId: string;
+  quantity: number;
+  note?: string;
 }
 
 export interface GroupBuyCreatePayload {

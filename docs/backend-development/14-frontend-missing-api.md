@@ -39,6 +39,31 @@
 - 编辑拼团时删除尚未有人认领的谷子条目。
 - 如果已有认领记录，应返回明确业务错误，并由前端提示不能直接删除。
 
+`POST /api/group-buy-items`
+
+状态：已实现。
+
+新增入参：
+
+- `initialRecords`：创建拼团商品时一并初始化的拼单记录列表，格式为 `{ memberUserId, quantity, note? }[]`。
+
+规则：
+
+- `initialRecords` 不是一张独立“自留/预留”业务表，只是创建时的便捷输入。
+- 后端在同一事务中创建正常的 `group_buy_records`，并同步维护 `group_buy_items.claimed_quantity` 与 `available_quantity`。
+- 每个成员同一商品只生成或合并为一条拼单记录。
+- 这些记录后续进入普通“我的拼单/费用/排发/转单”流程。
+
+`GET /api/app/groups/{groupId}/members`
+
+状态：已实现。
+
+用途：
+
+- 新建拼团页的初始化拼单记录归属人搜索。
+- 支持 `keyword`、`pageSize`。
+- 普通成员只能查到自己；拼单维护人和管理员可搜索当前谷团成员。
+
 ## 文件上传
 
 `POST /api/file-uploads`

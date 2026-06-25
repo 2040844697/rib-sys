@@ -264,6 +264,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            match = re.fullmatch(r"/api/app/groups/([^/]+)/members", path)
+            if self.command == "GET" and match:
+                self._write_json(
+                    HTTPStatus.OK,
+                    APP_CONTEXT.search_group_members(
+                        match.group(1),
+                        self._require_user(),
+                        {
+                            "keyword": query.get("keyword", [None])[0],
+                            "pageSize": query.get("pageSize", [None])[0],
+                        },
+                    ),
+                )
+                return
+
             match = re.fullmatch(r"/api/app/groups/([^/]+)/group-buys", path)
             if self.command == "GET" and match:
                 self._write_json(

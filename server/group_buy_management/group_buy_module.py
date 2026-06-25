@@ -253,6 +253,36 @@ def _payload_get(payload: dict[str, Any], *keys: str) -> tuple[bool, Any]:
     return False, None
 
 
+def _normalize_initial_records(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise AppError(400, "initialRecords格式不正确", "VALIDATION_FAILED")
+
+    records_by_member: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise AppError(400, "initialRecords格式不正确", "VALIDATION_FAILED")
+        member_user_id = _normalize_required_text(
+            item.get("memberUserId") if "memberUserId" in item else item.get("member_user_id"),
+            f"第{index}条初始化拼单记录成员",
+        )
+        quantity = _normalize_positive_int(item.get("quantity"), f"第{index}条初始化拼单记录数量")
+        note = _normalize_optional_text(item.get("note"), "初始化拼单记录备注")
+        if member_user_id in records_by_member:
+            records_by_member[member_user_id]["quantity"] += quantity
+            if note:
+                current_note = records_by_member[member_user_id].get("note")
+                records_by_member[member_user_id]["note"] = f"{current_note}；{note}" if current_note else note
+            continue
+        records_by_member[member_user_id] = {
+            "memberUserId": member_user_id,
+            "quantity": quantity,
+            "note": note,
+        }
+    return list(records_by_member.values())
+
+
 class GroupBuyModule:
     def __init__(
         self,
@@ -855,8 +885,22 @@ class GroupBuyModule:
             else payload.get("reserved_quantity", 0),
             "预留库存",
         )
+        initial_records = _normalize_initial_records(
+            payload.get("initialRecords") if "initialRecords" in payload else payload.get("initial_records")
+        )
+        initial_record_quantity = sum(record["quantity"] for record in initial_records)
+        if initial_records and reserved_quantity not in {0, initial_record_quantity}:
+            raise AppError(
+                400,
+                "预留库存应等于初始化拼单记录数量之和",
+                "VALIDATION_FAILED",
+            )
+        if initial_records:
+            reserved_quantity = 0
         if reserved_quantity > total_quantity:
             raise AppError(400, "预留库存不能大于总库存", "VALIDATION_FAILED")
+        if initial_record_quantity > total_quantity:
+            raise AppError(400, "初始化拼单记录数量不能大于总库存", "VALIDATION_FAILED")
 
         if goods_id:
             # 引用图鉴时，快照字段只在创建时复制一份，不回写图鉴本体。
@@ -900,6 +944,28 @@ class GroupBuyModule:
                 available_quantity=total_quantity - reserved_quantity,
                 note=_normalize_optional_text(payload.get("note"), "备注"),
             )
+            created_records = []
+            for record_payload in initial_records:
+                self._require_member_in_group(record_payload["memberUserId"], group_buy["groupId"])
+                if self.group_buy_records_module is None:
+                    raise AppError(500, "拼单记录模块未启用", "MODULE_UNAVAILABLE")
+                created_record = self.group_buy_records_module.create_record_in_connection(
+                    conn,
+                    actor_user_id,
+                    {
+                        "groupBuyId": group_buy_id,
+                        "groupBuyItemId": created["id"],
+                        "memberUserId": record_payload["memberUserId"],
+                        "quantity": record_payload["quantity"],
+                        "note": record_payload["note"],
+                    },
+                    allowed_group_buy_statuses={GROUP_BUY_STATUS_WAITING} | CLAIMABLE_GROUP_BUY_STATUSES,
+                    source="initial_claim",
+                    reason="创建拼团时初始化拼单记录",
+                )
+                created_records.append(created_record)
+            if created_records:
+                created = self._require_group_buy_item(conn, created["id"])
             self._audit(
                 conn,
                 actor_user_id=actor_user_id,
@@ -914,6 +980,7 @@ class GroupBuyModule:
         return {
             "groupBuyItemId": created["id"],
             "availableQuantity": created["availableQuantity"],
+            "createdRecordIds": [record["recordId"] for record in created_records],
         }
 
     def update_group_buy_item(

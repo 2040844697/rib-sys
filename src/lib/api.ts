@@ -15,6 +15,7 @@ import type {
   ListResponse,
   LoginRequest,
   LoginResponse,
+  MemberSummary,
   RegisterRequest,
   RegisterResponse,
   UploadFileResponse,
@@ -148,6 +149,11 @@ export const api = {
   getGroupHome(groupId: string) {
     return fetchJson<GroupHomeResponse>(`/api/app/groups/${groupId}/home`);
   },
+  searchGroupMembers(groupId: string, params: { keyword?: string; pageSize?: number }) {
+    return fetchJson<ListResponse<MemberSummary>>(
+      withQuery(`/api/app/groups/${groupId}/members`, params),
+    );
+  },
   getGroupBuys(groupId: string, params: { status?: string; keyword?: string; type?: string }) {
     return fetchJson<GroupBuysResponse>(
       withQuery(`/api/app/groups/${groupId}/group-buys`, params),
@@ -184,7 +190,7 @@ export const api = {
     });
   },
   createGroupBuyItem(payload: Record<string, unknown>) {
-    return fetchJson<{ groupBuyItemId: string }>("/api/group-buy-items", {
+    return fetchJson<{ groupBuyItemId: string; createdRecordIds?: string[] }>("/api/group-buy-items", {
       method: "POST",
       bodyJson: payload,
     });

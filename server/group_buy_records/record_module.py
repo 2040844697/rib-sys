@@ -192,6 +192,22 @@ class GroupBuyRecordsModule:
 
     def create_record_for_user(self, actor_user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         # AppContext 使用 user_id 调用 DB 版创建流程。
+        with connect(self.config) as conn:
+            result = self.create_record_in_connection(conn, actor_user_id, payload)
+            conn.commit()
+        return result
+
+    def create_record_in_connection(
+        self,
+        conn,
+        actor_user_id: str,
+        payload: dict[str, Any],
+        *,
+        allowed_group_buy_statuses: set[str] | None = None,
+        source: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        # 供拼单商品创建等上游流程在同一事务中初始化正常拼单记录。
         raw_group_buy_id = payload.get("groupBuyId") if "groupBuyId" in payload else payload.get("group_buy_id")
         payload_group_buy_id = _normalize_optional_text(raw_group_buy_id, "拼单")
         group_buy_item_id = _normalize_required_text(
@@ -208,121 +224,124 @@ class GroupBuyRecordsModule:
         ) or actor_user_id
         quantity = _normalize_positive_int(payload.get("quantity"), "数量")
         note = _normalize_optional_text(payload.get("note"), "备注")
-        source = _normalize_optional_text(payload.get("source"), "source")
-        if source is None:
-            source = DEFAULT_RECORD_SOURCE if actor_user_id == member_user_id else "maintainer_create"
+        payload_source = _normalize_optional_text(payload.get("source"), "source")
+        normalized_source = payload_source or (
+            _normalize_optional_text(source, "source") if source is not None else None
+        )
+        if normalized_source is None:
+            normalized_source = DEFAULT_RECORD_SOURCE if actor_user_id == member_user_id else "maintainer_create"
+        audit_reason = reason or ("成员认领商品" if actor_user_id == member_user_id else "维护人代成员建单")
 
-        with connect(self.config) as conn:
-            group_buy_item = self._require_group_buy_item_in_connection(conn, group_buy_item_id, lock=True)
-            group_buy_id = group_buy_item["groupBuyId"]
-            if payload_group_buy_id is not None and payload_group_buy_id != group_buy_id:
-                raise AppError(400, "拼单商品不属于当前拼单", "VALIDATION_FAILED")
-            group_buy = self._require_group_buy_in_connection(conn, group_buy_id, lock=True)
-            self._assert_group_access(actor_user_id, group_buy["groupId"])
-            self._require_user(member_user_id, "成员")
-            self._assert_can_create_for_member(actor_user_id, member_user_id)
-            if group_buy["status"] not in CLAIMABLE_GROUP_BUY_STATUSES:
-                raise AppError(400, "当前拼单状态暂时不能认领", "INVALID_STATUS")
-            if quantity > group_buy_item["availableQuantity"]:
-                raise AppError(400, "可认领数量不足", "INSUFFICIENT_STOCK")
+        group_buy_item = self._require_group_buy_item_in_connection(conn, group_buy_item_id, lock=True)
+        group_buy_id = group_buy_item["groupBuyId"]
+        if payload_group_buy_id is not None and payload_group_buy_id != group_buy_id:
+            raise AppError(400, "拼单商品不属于当前拼单", "VALIDATION_FAILED")
+        group_buy = self._require_group_buy_in_connection(conn, group_buy_id, lock=True)
+        self._assert_group_access(actor_user_id, group_buy["groupId"])
+        self._require_user(member_user_id, "成员")
+        self._assert_can_create_for_member(actor_user_id, member_user_id)
+        allowed_statuses = allowed_group_buy_statuses or CLAIMABLE_GROUP_BUY_STATUSES
+        if group_buy["status"] not in allowed_statuses:
+            raise AppError(400, "当前拼单状态暂时不能认领", "INVALID_STATUS")
+        if quantity > group_buy_item["availableQuantity"]:
+            raise AppError(400, "可认领数量不足", "INSUFFICIENT_STOCK")
 
-            item_after_claim = self.repo.update_group_buy_item_claimed_delta(
+        item_after_claim = self.repo.update_group_buy_item_claimed_delta(
+            conn,
+            group_buy_item_id=group_buy_item_id,
+            delta_quantity=quantity,
+        )
+        self._audit(
+            conn,
+            actor_user_id=actor_user_id,
+            action="group_buy_item.claim_stock",
+            object_type="group_buy_item",
+            object_id=group_buy_item_id,
+            before=group_buy_item,
+            after=item_after_claim,
+            reason=reason or f"成员 {member_user_id} 认领 {quantity} 件",
+        )
+
+        existing_record = self.repo.get_record_for_member(
+            conn,
+            group_buy_item_id=group_buy_item_id,
+            member_user_id=member_user_id,
+            lock=True,
+        )
+        if existing_record is None:
+            record = self.repo.create_record(
                 conn,
+                group_buy_id=group_buy_id,
                 group_buy_item_id=group_buy_item_id,
-                delta_quantity=quantity,
+                member_user_id=member_user_id,
+                quantity=quantity,
+                status=GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT,
+                status_priority=_status_priority(GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT),
+                note=note,
+                source=normalized_source,
             )
             self._audit(
                 conn,
                 actor_user_id=actor_user_id,
-                action="group_buy_item.claim_stock",
-                object_type="group_buy_item",
-                object_id=group_buy_item_id,
-                before=group_buy_item,
-                after=item_after_claim,
-                reason=f"成员 {member_user_id} 认领 {quantity} 件",
+                action="record.create",
+                object_type="group_buy_record",
+                object_id=record["id"],
+                before=None,
+                after=record,
+                reason=audit_reason,
             )
-
-            existing_record = self.repo.get_record_for_member(
+        else:
+            before = clone(existing_record)
+            record = self.repo.update_record_quantity(
                 conn,
-                group_buy_item_id=group_buy_item_id,
-                member_user_id=member_user_id,
-                lock=True,
+                group_buy_record_id=existing_record["id"],
+                quantity=existing_record["quantity"] + quantity,
             )
-            if existing_record is None:
-                record = self.repo.create_record(
-                    conn,
-                    group_buy_id=group_buy_id,
-                    group_buy_item_id=group_buy_item_id,
-                    member_user_id=member_user_id,
-                    quantity=quantity,
-                    status=GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT,
-                    status_priority=_status_priority(GROUP_BUY_RECORD_STATUS_PENDING_GOODS_PAYMENT),
-                    note=note,
-                    source=source,
-                )
-                self._audit(
-                    conn,
-                    actor_user_id=actor_user_id,
-                    action="record.create",
-                    object_type="group_buy_record",
-                    object_id=record["id"],
-                    before=None,
-                    after=record,
-                    reason="成员认领商品" if actor_user_id == member_user_id else "维护人代成员建单",
-                )
-            else:
-                before = clone(existing_record)
-                record = self.repo.update_record_quantity(
-                    conn,
-                    group_buy_record_id=existing_record["id"],
-                    quantity=existing_record["quantity"] + quantity,
-                )
-                self._audit(
-                    conn,
-                    actor_user_id=actor_user_id,
-                    action="record.update_quantity",
-                    object_type="group_buy_record",
-                    object_id=record["id"],
-                    before=before,
-                    after=record,
-                    reason="成员追加认领" if actor_user_id == member_user_id else "维护人代成员追加认领",
-                )
-
-            if record.get("goodsChargeId") is None:
-                charge_id = self._create_initial_goods_charge(
-                    conn,
-                    record,
-                    group_buy=group_buy,
-                    item=group_buy_item,
-                    quantity_for_charge=quantity,
-                    actor_user_id=actor_user_id,
-                )
-                if charge_id:
-                    record = self.repo.link_charge(
-                        conn,
-                        group_buy_record_id=record["id"],
-                        charge_type=CHARGE_TYPE_INITIAL_GOODS,
-                        charge_id=charge_id,
-                    )
-                    self._audit(
-                        conn,
-                        actor_user_id=actor_user_id,
-                        action="record.link_charge",
-                        object_type="group_buy_record",
-                        object_id=record["id"],
-                        before={**record, "goodsChargeId": None},
-                        after=record,
-                        reason="关联商品首款费用",
-                    )
-
-            record = self._recalculate_record_status_in_connection(
+            self._audit(
                 conn,
-                record["id"],
                 actor_user_id=actor_user_id,
-                reason="认领后重新计算状态",
-                write_audit=True,
+                action="record.update_quantity",
+                object_type="group_buy_record",
+                object_id=record["id"],
+                before=before,
+                after=record,
+                reason=reason or ("成员追加认领" if actor_user_id == member_user_id else "维护人代成员追加认领"),
             )
-            conn.commit()
+
+        if record.get("goodsChargeId") is None:
+            charge_id = self._create_initial_goods_charge(
+                conn,
+                record,
+                group_buy=group_buy,
+                item=group_buy_item,
+                quantity_for_charge=quantity,
+                actor_user_id=actor_user_id,
+            )
+            if charge_id:
+                record = self.repo.link_charge(
+                    conn,
+                    group_buy_record_id=record["id"],
+                    charge_type=CHARGE_TYPE_INITIAL_GOODS,
+                    charge_id=charge_id,
+                )
+                self._audit(
+                    conn,
+                    actor_user_id=actor_user_id,
+                    action="record.link_charge",
+                    object_type="group_buy_record",
+                    object_id=record["id"],
+                    before={**record, "goodsChargeId": None},
+                    after=record,
+                    reason="关联商品首款费用",
+                )
+
+        record = self._recalculate_record_status_in_connection(
+            conn,
+            record["id"],
+            actor_user_id=actor_user_id,
+            reason=reason or "认领后重新计算状态",
+            write_audit=True,
+        )
 
         return {
             "groupBuyRecordId": record["id"],

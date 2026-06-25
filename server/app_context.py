@@ -596,6 +596,65 @@ class AppContext:
             )
         return result
 
+    def search_group_members(
+        self,
+        group_id: str,
+        user: dict[str, Any],
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._get_visible_group(group_id, user)
+        keyword = str((params or {}).get("keyword") or "").strip()
+        raw_page_size = (params or {}).get("pageSize")
+        try:
+            page_size = int(raw_page_size) if raw_page_size else 20
+        except (TypeError, ValueError):
+            page_size = 20
+        page_size = max(1, min(page_size, 50))
+
+        can_search_group = has_permission(user, "record:create_for_member") or has_permission(user, "user:manage")
+        conditions = ["u.group_id = %s", "u.status = 'active'"]
+        values: list[Any] = [group_id]
+        if keyword:
+            conditions.append(
+                "(u.display_name ILIKE %s OR u.group_nickname ILIKE %s OR u.qq_number ILIKE %s OR u.account ILIKE %s)"
+            )
+            keyword_like = f"%{keyword}%"
+            values.extend([keyword_like, keyword_like, keyword_like, keyword_like])
+        if not can_search_group:
+            conditions.append("u.id = %s")
+            values.append(user["id"])
+        values.append(page_size)
+
+        with connect(self.config, row_factory=self._dict_row()) as conn:
+            with conn.cursor(row_factory=self._dict_row()) as cur:
+                cur.execute(
+                    f"""
+                    SELECT u.id, u.display_name, u.group_nickname, u.qq_number, u.group_id
+                    FROM users u
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY
+                      CASE WHEN u.id = %s THEN 0 ELSE 1 END,
+                      u.display_name ASC,
+                      u.id ASC
+                    LIMIT %s
+                    """,
+                    [*values[:-1], user["id"], values[-1]],
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+
+        items = [
+            {
+                "id": row["id"],
+                "groupId": row["group_id"],
+                "displayName": row["display_name"],
+                "groupNickname": row.get("group_nickname"),
+                "qqNumber": row.get("qq_number"),
+            }
+            for row in rows
+        ]
+        return {"items": items, "total": len(items)}
+
     def build_admin_capabilities(self, group_id: str, user: dict[str, Any]) -> dict[str, Any]:
         self._get_visible_group(group_id, user)
         return {

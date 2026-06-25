@@ -17,8 +17,9 @@ import {
 } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
+import { useAuthState } from "@/lib/auth-store";
 import { cn } from "@/lib/utils";
-import type { GoodsSummary, GroupBuyItem, UploadedImageRef } from "@/types";
+import type { GoodsSummary, GroupBuyItem, MemberSummary, UploadedImageRef } from "@/types";
 import {
   Button,
   EmptyState,
@@ -64,7 +65,8 @@ interface EditableItem {
   unitPriceCny: string;
   priceAdjustmentCny: string;
   totalQuantity: string;
-  reservedQuantity: string;
+  initialRecordsEnabled: boolean;
+  initialRecords: InitialRecordDraft[];
   weightGram: string;
   characterNames: string[];
   description: string;
@@ -72,6 +74,14 @@ interface EditableItem {
   sourceName?: string;
   sourceImageUrl?: string;
   sourceWeightGram?: string;
+}
+
+interface InitialRecordDraft {
+  localId: string;
+  memberUserId: string;
+  displayName: string;
+  keyword: string;
+  quantity: string;
 }
 
 interface LocalImageRef extends UploadedImageRef {
@@ -116,11 +126,22 @@ function emptyEditableItem(): EditableItem {
     unitPriceCny: "",
     priceAdjustmentCny: "0",
     totalQuantity: "1",
-    reservedQuantity: "0",
+    initialRecordsEnabled: false,
+    initialRecords: [],
     weightGram: "0",
     characterNames: [],
     description: "",
     note: "",
+  };
+}
+
+function initialRecordForMember(member?: MemberSummary | null): InitialRecordDraft {
+  return {
+    localId: createLocalId("record"),
+    memberUserId: member?.id || "",
+    displayName: member?.displayName || "",
+    keyword: member?.displayName || member?.groupNickname || "",
+    quantity: "1",
   };
 }
 
@@ -194,7 +215,8 @@ function itemFromGoods(goods: GoodsSummary): EditableItem {
     unitPriceCny: price,
     priceAdjustmentCny: "0",
     totalQuantity: "1",
-    reservedQuantity: "0",
+    initialRecordsEnabled: false,
+    initialRecords: [],
     weightGram: weight,
     characterNames: goods.characterNames || [],
     description: goods.description || "",
@@ -216,7 +238,8 @@ function itemFromDetail(item: GroupBuyItem): EditableItem {
     unitPriceCny: cleanMoney(item.unitPriceCny),
     priceAdjustmentCny: "0",
     totalQuantity: String(item.totalQuantity ?? 1),
-    reservedQuantity: String(item.reservedQuantity ?? 0),
+    initialRecordsEnabled: false,
+    initialRecords: [],
     weightGram: String(weight ?? 0),
     characterNames: item.characterNames || (item.characterName ? [item.characterName] : []),
     description: item.description || "",
@@ -229,8 +252,14 @@ function itemFromDetail(item: GroupBuyItem): EditableItem {
 
 function createItemPayload(item: EditableItem, groupBuyId: string, equalPriceEnabled: boolean, equalPrice: string, includeGoodsId: boolean) {
   const totalQuantity = parsePositiveInt(item.totalQuantity, "库存");
-  const reservedQuantity = parseNonNegativeInt(item.reservedQuantity, "预留库存");
-  if (reservedQuantity > totalQuantity) throw new Error("预留库存不能大于库存");
+  const initialRecords = item.initialRecordsEnabled
+    ? item.initialRecords.map((record) => ({
+        memberUserId: record.memberUserId,
+        quantity: parsePositiveInt(record.quantity, `${item.name || "谷子"}初始化拼单记录数量`),
+      }))
+    : [];
+  const initialRecordTotal = initialRecords.reduce((sum, record) => sum + record.quantity, 0);
+  if (initialRecordTotal > totalQuantity) throw new Error("初始化拼单记录数量不能大于库存");
 
   const weightGram = parseNonNegativeInt(item.weightGram || "0", "重量");
   const unitPriceCny = backendMoney(getItemFinalPrice(item, equalPriceEnabled, equalPrice));
@@ -243,7 +272,7 @@ function createItemPayload(item: EditableItem, groupBuyId: string, equalPriceEna
     imageUrl: imageUrl || undefined,
     unitPriceCny,
     totalQuantity,
-    reservedQuantity,
+    initialRecords: initialRecords.length ? initialRecords : undefined,
     weightGram,
     characterNames: item.characterNames,
     description: item.description.trim() || undefined,
@@ -256,9 +285,28 @@ function validateItem(item: EditableItem, equalPriceEnabled: boolean, equalPrice
   if (!item.name.trim()) throw new Error("请补全谷子名称");
   const price = getItemFinalPrice(item, equalPriceEnabled, equalPrice);
   if (!Number.isFinite(price) || price < 0) throw new Error(`${item.name || "谷子"} 的价格不正确`);
-  parsePositiveInt(item.totalQuantity, `${item.name || "谷子"}库存`);
-  parseNonNegativeInt(item.reservedQuantity, `${item.name || "谷子"}预留库存`);
+  const totalQuantity = parsePositiveInt(item.totalQuantity, `${item.name || "谷子"}库存`);
+  if (item.initialRecordsEnabled) {
+    if (item.initialRecords.length === 0) throw new Error(`${item.name || "谷子"}需要至少添加一条初始化拼单记录`);
+    const seenMemberIds = new Set<string>();
+    const initialRecordTotal = item.initialRecords.reduce((sum, record) => {
+      if (!record.memberUserId) throw new Error(`${item.name || "谷子"}的归属人需要从匹配结果中选择`);
+      if (seenMemberIds.has(record.memberUserId)) throw new Error(`${item.name || "谷子"}的归属人不能重复`);
+      seenMemberIds.add(record.memberUserId);
+      return sum + parsePositiveInt(record.quantity, `${item.name || "谷子"}初始化拼单记录数量`);
+    }, 0);
+    if (initialRecordTotal > totalQuantity) throw new Error(`${item.name || "谷子"}初始化拼单记录数量不能大于库存`);
+  }
   parseNonNegativeInt(item.weightGram || "0", `${item.name || "谷子"}重量`);
+}
+
+function getInitialRecordTotal(item: EditableItem) {
+  if (!item.initialRecordsEnabled) return 0;
+  return item.initialRecords.reduce((sum, record) => {
+    const quantity = Number(record.quantity || 0);
+    if (!Number.isFinite(quantity) || quantity < 0) return sum;
+    return sum + quantity;
+  }, 0);
 }
 
 function formatSaveError(error: Error) {
@@ -547,7 +595,7 @@ function ItemCard({
             <p className="mt-1 text-sm text-slate-500">
               库存:{item.totalQuantity || 0}
               <span className="mx-2 text-slate-300">/</span>
-              预留:{item.reservedQuantity || 0}
+              已建单:{getInitialRecordTotal(item)}
               <span className="mx-2 text-slate-300">/</span>
               重量:{item.weightGram || 0}g
             </p>
@@ -582,24 +630,101 @@ function ItemCard({
 
 function ItemEditorModal({
   item,
+  groupId,
+  currentUser,
   equalPriceEnabled,
   equalPrice,
   onSave,
   onClose,
 }: {
   item: EditableItem | null;
+  groupId: string;
+  currentUser: MemberSummary | null;
   equalPriceEnabled: boolean;
   equalPrice: string;
   onSave: (item: EditableItem) => void;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<EditableItem | null>(item);
+  const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
 
-  useEffect(() => setDraft(item), [item]);
+  useEffect(() => {
+    setDraft(item);
+    setActiveRecordId(null);
+  }, [item]);
+
+  const activeRecord = draft?.initialRecords.find((record) => record.localId === activeRecordId);
+  const deferredMemberKeyword = useDeferredValue(activeRecord?.keyword || "");
+  const membersQuery = useQuery({
+    queryKey: ["group-members", groupId, deferredMemberKeyword],
+    queryFn: () => api.searchGroupMembers(groupId, { keyword: deferredMemberKeyword, pageSize: 8 }),
+    enabled: Boolean(groupId && draft?.initialRecordsEnabled && activeRecordId),
+    placeholderData: keepPreviousData,
+  });
 
   if (!draft) return null;
 
   const finalPrice = getItemFinalPrice(draft, equalPriceEnabled, equalPrice);
+  const initialRecordTotal = getInitialRecordTotal(draft);
+  const stockQuantity = Number(draft.totalQuantity || 0);
+  const initialRecordTooLarge = Number.isFinite(stockQuantity) && initialRecordTotal > stockQuantity;
+
+  function setInitialRecordsEnabled(enabled: boolean) {
+    setDraft((current) => {
+      if (!current) return current;
+      if (!enabled) {
+        setActiveRecordId(null);
+        return { ...current, initialRecordsEnabled: false, initialRecords: [] };
+      }
+      const nextRecords = current.initialRecords.length
+        ? current.initialRecords
+        : [initialRecordForMember(currentUser)];
+      setActiveRecordId(nextRecords[0]?.localId || null);
+      return { ...current, initialRecordsEnabled: true, initialRecords: nextRecords };
+    });
+  }
+
+  function updateInitialRecord(localId: string, patch: Partial<InitialRecordDraft>) {
+    setDraft((current) => current
+      ? {
+          ...current,
+          initialRecords: current.initialRecords.map((record) => (
+            record.localId === localId ? { ...record, ...patch } : record
+          )),
+        }
+      : current);
+  }
+
+  function addInitialRecord() {
+    setDraft((current) => {
+      if (!current) return current;
+      const nextRecord = initialRecordForMember(currentUser);
+      setActiveRecordId(nextRecord.localId);
+      return { ...current, initialRecords: [...current.initialRecords, nextRecord] };
+    });
+  }
+
+  function removeInitialRecord(localId: string) {
+    setDraft((current) => {
+      if (!current) return current;
+      const nextRecords = current.initialRecords.filter((record) => record.localId !== localId);
+      if (activeRecordId === localId) setActiveRecordId(nextRecords[0]?.localId || null);
+      return {
+        ...current,
+        initialRecords: nextRecords,
+        initialRecordsEnabled: nextRecords.length > 0,
+      };
+    });
+  }
+
+  function chooseMember(localId: string, member: MemberSummary) {
+    updateInitialRecord(localId, {
+      memberUserId: member.id,
+      displayName: member.displayName,
+      keyword: member.displayName,
+    });
+    setActiveRecordId(null);
+  }
 
   return (
     <Modal onClose={onClose} open={Boolean(item)} title="编辑谷子">
@@ -670,14 +795,6 @@ function ItemEditorModal({
             />
           </label>
           <label className="block">
-            <span className="mb-1.5 block text-sm font-medium text-slate-700">预留库存</span>
-            <TextInput
-              inputMode="numeric"
-              onChange={(event) => setDraft({ ...draft, reservedQuantity: event.target.value })}
-              value={draft.reservedQuantity}
-            />
-          </label>
-          <label className="block">
             <span className="mb-1.5 block text-sm font-medium text-slate-700">重量(g)</span>
             <TextInput
               inputMode="numeric"
@@ -688,14 +805,130 @@ function ItemEditorModal({
           </label>
         </div>
 
+        <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <label className="flex items-center justify-between gap-3">
+            <span>
+              <span className="block text-sm font-semibold text-slate-950">是否预留（自留）</span>
+              <span className="mt-1 block text-xs leading-5 text-slate-500">
+                保存后会创建对应拼单记录，并同步扣减可拼库存。
+              </span>
+            </span>
+            <input
+              checked={draft.initialRecordsEnabled}
+              className="size-4 accent-cyan-600"
+              onChange={(event) => setInitialRecordsEnabled(event.target.checked)}
+              type="checkbox"
+            />
+          </label>
+
+          {draft.initialRecordsEnabled ? (
+            <div className="mt-3 space-y-3">
+              {draft.initialRecords.map((record) => (
+                <div className="rounded-lg border border-slate-200 bg-white p-3" key={record.localId}>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_110px_auto]">
+                    <div className="relative">
+                      <span className="mb-1.5 block text-sm font-medium text-slate-700">归属人</span>
+                      <TextInput
+                        onBlur={() => {
+                          window.setTimeout(() => {
+                            if (activeRecordId === record.localId) setActiveRecordId(null);
+                          }, 120);
+                        }}
+                        onChange={(event) => {
+                          updateInitialRecord(record.localId, {
+                            keyword: event.target.value,
+                            memberUserId: "",
+                            displayName: "",
+                          });
+                          setActiveRecordId(record.localId);
+                        }}
+                        onFocus={() => setActiveRecordId(record.localId)}
+                        placeholder="输入昵称、QQ 或账号"
+                        value={record.keyword}
+                      />
+                      {activeRecordId === record.localId ? (
+                        <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                          {membersQuery.isLoading ? (
+                            <div className="px-3 py-2 text-sm text-slate-500">搜索中...</div>
+                          ) : null}
+                          {membersQuery.isError ? (
+                            <div className="px-3 py-2 text-sm text-rose-600">成员搜索失败</div>
+                          ) : null}
+                          {membersQuery.data?.items.length === 0 ? (
+                            <div className="px-3 py-2 text-sm text-slate-500">没有匹配成员</div>
+                          ) : null}
+                          {membersQuery.data?.items.map((member) => (
+                            <button
+                              className="flex w-full flex-col rounded-md px-3 py-2 text-left hover:bg-cyan-50"
+                              key={member.id}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => chooseMember(record.localId, member)}
+                              type="button"
+                            >
+                              <span className="text-sm font-semibold text-slate-950">{member.displayName}</span>
+                              <span className="text-xs text-slate-500">
+                                {member.groupNickname || "未填群昵称"}
+                                {member.qqNumber ? ` · ${member.qqNumber}` : ""}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <label className="block">
+                      <span className="mb-1.5 block text-sm font-medium text-slate-700">数量</span>
+                      <TextInput
+                        inputMode="numeric"
+                        onChange={(event) => updateInitialRecord(record.localId, { quantity: event.target.value })}
+                        value={record.quantity}
+                      />
+                    </label>
+
+                    <div className="flex items-end">
+                      <Button
+                        className="min-h-10 px-3"
+                        disabled={draft.initialRecords.length <= 1}
+                        onClick={() => removeInitialRecord(record.localId)}
+                        type="button"
+                        variant="secondary"
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  {record.memberUserId ? (
+                    <div className="mt-2 text-xs text-cyan-700">已选择：{record.displayName || record.keyword}</div>
+                  ) : (
+                    <div className="mt-2 text-xs text-amber-700">需要从匹配结果中选择归属人</div>
+                  )}
+                </div>
+              ))}
+
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <Button onClick={addInitialRecord} type="button" variant="secondary">
+                  <Plus className="size-4" />
+                  添加归属人
+                </Button>
+                <div className={cn("text-sm", initialRecordTooLarge ? "text-rose-600" : "text-slate-500")}>
+                  已建单数量 {initialRecordTotal} / 库存 {draft.totalQuantity || 0}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
         <div className="mt-5 flex justify-end gap-2">
           <Button onClick={onClose} type="button" variant="secondary">取消</Button>
           <Button
-            onClick={() => onSave({
-              ...draft,
-              unitPriceCny: equalPriceEnabled ? cleanMoney(finalPrice) : draft.unitPriceCny,
-              weightGram: draft.weightGram || "0",
-            })}
+            onClick={() => {
+              if (initialRecordTooLarge) return;
+              onSave({
+                ...draft,
+                unitPriceCny: equalPriceEnabled ? cleanMoney(finalPrice) : draft.unitPriceCny,
+                weightGram: draft.weightGram || "0",
+              });
+            }}
             type="button"
           >
             保存
@@ -829,6 +1062,7 @@ export function GroupBuyFormPage() {
   const routeGroupId = params.groupId;
   const groupBuyId = params.groupBuyId;
   const navigate = useNavigate();
+  const auth = useAuthState();
   const [form, setForm] = useState<FormState>(initialForm);
   const [items, setItems] = useState<EditableItem[]>([]);
   const [itemsExpanded, setItemsExpanded] = useState(false);
@@ -894,6 +1128,15 @@ export function GroupBuyFormPage() {
   const firstItem = items[0];
   const hiddenItemCount = Math.max(items.length - 1, 0);
   const groupName = groupHomeQuery.data?.group.name || groupsQuery.data?.items.find((group) => group.id === activeGroupId)?.name;
+  const currentMember: MemberSummary | null = auth.user
+    ? {
+        id: auth.user.id,
+        groupId: auth.user.groupId,
+        displayName: auth.user.displayName,
+        groupNickname: auth.user.groupNickname,
+        qqNumber: auth.user.qqNumber,
+      }
+    : null;
 
   async function uploadLocalImage(image: LocalImageRef) {
     if (!image.file) return image;
@@ -1003,6 +1246,9 @@ export function GroupBuyFormPage() {
       for (const item of uploadedItems) {
         const includeGoodsId = Boolean(item.goodsId && !item.persistedId);
         if (item.persistedId) {
+          if (item.initialRecordsEnabled && item.initialRecords.length > 0) {
+            throw new Error("已保存谷子的初始化拼单记录不能在编辑页重复创建，请到拼单详情里管理记录。");
+          }
           await api.updateGroupBuyItem(
             item.persistedId,
             createItemPayload(item, nextGroupBuyId, equalPriceEnabled, equalPrice, false),
@@ -1089,6 +1335,8 @@ export function GroupBuyFormPage() {
         localId: createLocalId("copy"),
         persistedId: undefined,
         name: `${item.name} 复制`,
+        initialRecordsEnabled: false,
+        initialRecords: [],
       },
     ]);
     setItemsExpanded(true);
@@ -1302,8 +1550,10 @@ export function GroupBuyFormPage() {
       </div>
 
       <ItemEditorModal
+        currentUser={currentMember}
         equalPrice={equalPrice}
         equalPriceEnabled={equalPriceEnabled}
+        groupId={activeGroupId}
         item={editingItem}
         onClose={() => setEditingItem(null)}
         onSave={upsertItem}
