@@ -108,10 +108,35 @@ CREATE TABLE IF NOT EXISTS file_objects (
 );
 
 ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS bucket TEXT;
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS object_key TEXT;
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS url TEXT;
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS content_type TEXT;
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS size_bytes BIGINT;
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS uploaded_by TEXT REFERENCES users(id);
+
+ALTER TABLE file_objects
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE file_objects
   ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
 ALTER TABLE file_objects
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_objects_bucket_object_key
+  ON file_objects(bucket, object_key)
+  WHERE bucket IS NOT NULL AND object_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS goods (
   id TEXT PRIMARY KEY,

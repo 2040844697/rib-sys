@@ -730,6 +730,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:  # pragma: no cover - fallback safety
             print("[ribsys-api] unexpected error", exc)
+            import traceback
+
+            traceback.print_exc()
             self._write_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"code": "INTERNAL_ERROR", "message": "服务内部错误"},

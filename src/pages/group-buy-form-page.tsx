@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { GoodsSummary, GroupBuyItem, UploadedImageRef } from "@/types";
 import {
@@ -259,6 +259,13 @@ function validateItem(item: EditableItem, equalPriceEnabled: boolean, equalPrice
   parsePositiveInt(item.totalQuantity, `${item.name || "谷子"}库存`);
   parseNonNegativeInt(item.reservedQuantity, `${item.name || "谷子"}预留库存`);
   parseNonNegativeInt(item.weightGram || "0", `${item.name || "谷子"}重量`);
+}
+
+function formatSaveError(error: Error) {
+  if (error instanceof ApiError) {
+    return `${error.message}（HTTP ${error.status}${error.code ? ` / ${error.code}` : ""}）`;
+  }
+  return error.message;
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -1284,7 +1291,7 @@ export function GroupBuyFormPage() {
         </SettingRow>
       </SettingPanel>
 
-      {save.error ? <ErrorState title="保存失败" description={save.error.message} /> : null}
+      {save.error ? <ErrorState title="保存失败" description={formatSaveError(save.error)} /> : null}
 
       <div className="sticky bottom-20 z-20 flex justify-end gap-2 rounded-lg border border-slate-200 bg-white/90 p-3 shadow-lg backdrop-blur md:bottom-4">
         <Button onClick={() => setForm(initialForm)} type="button" variant="secondary">重置</Button>

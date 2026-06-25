@@ -116,15 +116,18 @@ export function Field({
 }
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cn("control", props.className)} {...props} />;
+  const { className, ...rest } = props;
+  return <input className={cn("control", className)} {...rest} />;
 }
 
 export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={cn("control min-h-28", props.className)} {...props} />;
+  const { className, ...rest } = props;
+  return <textarea className={cn("control min-h-28", className)} {...rest} />;
 }
 
 export function SelectInput(props: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select className={cn("control", props.className)} {...props} />;
+  const { className, ...rest } = props;
+  return <select className={cn("control", className)} {...rest} />;
 }
 
 export function SearchBox({
