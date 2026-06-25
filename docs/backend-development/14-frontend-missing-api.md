@@ -10,6 +10,40 @@
 
 - 返回当前用户参与的拼团记录、商品份额、展示状态、关联费用、排发和转单状态。
 
+## 拼团创建/编辑扩展字段
+
+现有 `POST /api/group-buys`、`PATCH /api/group-buys/{groupBuyId}` 已用于新建拼团页，但当前后端只持久化 `groupId`、`type`、`title`、`description`、`closeAt`、`paymentChannelId`、`warehouseUserId`。
+
+新建拼团页还需要后端支持以下字段：
+
+- `startAt`：活动开始时间。
+- `coverImageUrl` / `coverFileObjectId`：活动主图。
+- `claimMode`：拼谷类型，例如 `拼盒`、`单领`。
+- `canCancelClaim`：是否允许成员撤排。
+- `saleMode`：售卖方式，例如 `全款`、`定金尾款`。
+- `allowTransfer`：是否允许团员转单。
+- `advancedSettings`：高级展示/提醒配置，包括 `remindBeforeStart`、`showParticipantCount`、`showTotalAmount`、`showClaimedQuantity`。
+
+期望：详情接口 `GET /api/app/group-buys/{groupBuyId}/detail` 同步返回上述字段，便于编辑页回填。
+
+`DELETE /api/group-buy-items/{groupBuyItemId}`
+
+用途：
+
+- 编辑拼团时删除尚未有人认领的谷子条目。
+- 如果已有认领记录，应返回明确业务错误，并由前端提示不能直接删除。
+
+## 文件上传
+
+`POST /api/file-uploads`
+
+用途：
+
+- 浏览器直接上传图片文件，返回 `fileObjectId`、`url`、`bucket`。
+- 新建拼团页需要用于活动主图和手动新增谷子图片。
+
+说明：当前 `POST /api/file-objects` 只能登记文件对象，不能接收浏览器上传的二进制文件；前端目前只能提交图片 URL 或使用本地预览。
+
 ## 我的费用
 
 `GET /api/my/charges`

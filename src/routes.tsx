@@ -100,6 +100,7 @@ const groupsRoute = createRoute({ getParentRoute: () => appRoute, path: "groups"
 const groupDetailRoute = createRoute({ getParentRoute: () => appRoute, path: "groups/$groupId", component: GroupDetailPage });
 const groupAdminRoute = createRoute({ getParentRoute: () => appRoute, path: "groups/$groupId/admin", component: AdminHomePage });
 const groupBuyNewRoute = createRoute({ getParentRoute: () => appRoute, path: "group-buys/new", component: GroupBuyFormPage });
+const groupScopedBuyNewRoute = createRoute({ getParentRoute: () => appRoute, path: "groups/$groupId/group-buys/new", component: GroupBuyFormPage });
 const groupBuyEditRoute = createRoute({ getParentRoute: () => appRoute, path: "group-buys/$groupBuyId/edit", component: GroupBuyFormPage });
 const groupBuyDetailRoute = createRoute({ getParentRoute: () => appRoute, path: "group-buys/$groupBuyId", component: GroupBuyDetailPage });
 const goodsRoute = createRoute({ getParentRoute: () => appRoute, path: "goods", component: GoodsPage });
@@ -130,6 +131,7 @@ const routeTree = rootRoute.addChildren([
     groupDetailRoute,
     groupAdminRoute,
     groupBuyNewRoute,
+    groupScopedBuyNewRoute,
     groupBuyEditRoute,
     groupBuyDetailRoute,
     goodsRoute,

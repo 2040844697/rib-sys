@@ -45,7 +45,11 @@ export function GroupDetailPage() {
         description={group.description || "谷团详情默认显示当前正在进行中的拼谷。"}
         action={
           <>
-            {capabilities.canCreateGroupBuy ? <Link to="/app/group-buys/new" className="btn btn-primary"><Plus className="size-4" />新建拼团</Link> : null}
+            {capabilities.canCreateGroupBuy ? (
+              <Link to="/app/groups/$groupId/group-buys/new" params={{ groupId }} className="btn btn-primary">
+                <Plus className="size-4" />新建拼团
+              </Link>
+            ) : null}
             {capabilities.canEnterAdmin ? <Link to="/app/groups/$groupId/admin" params={{ groupId }} className="btn btn-secondary"><Settings className="size-4" />管理台</Link> : null}
           </>
         }

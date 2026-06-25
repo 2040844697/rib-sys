@@ -126,14 +126,17 @@ export interface GroupBuyItem {
   alias?: string | null;
   characterName?: string;
   characterNames?: string[];
+  description?: string | null;
   imageUrl: string | null;
   unitPriceCny: string;
+  weightGram?: number | null;
   estimatedWeightGram?: number | null;
   totalQuantity: number;
   claimedQuantity: number;
   reservedQuantity?: number;
   availableQuantity: number;
   status: string;
+  note?: string | null;
 }
 
 export interface GroupBuyRecord {

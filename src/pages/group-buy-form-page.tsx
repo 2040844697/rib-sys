@@ -1,113 +1,1180 @@
-import { useEffect } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  ImagePlus,
+  Library,
+  PackagePlus,
+  Pencil,
+  Plus,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 
 import { api } from "@/lib/api";
-import { Button, ErrorState, Field, LoadingRows, PageHeader, SelectInput, Surface, TextArea, TextInput } from "@/components/ui";
+import { cn } from "@/lib/utils";
+import type { GoodsSummary, GroupBuyItem } from "@/types";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingRows,
+  PageHeader,
+  SearchBox,
+  SelectInput,
+  Surface,
+  TextArea,
+  TextInput,
+} from "@/components/ui";
 
-interface FormValues {
-  groupId: string;
-  type: string;
+type ClaimMode = "拼盒" | "单领";
+type SaleMode = "全款" | "定金尾款";
+
+interface FormState {
   title: string;
   description: string;
+  coverImageUrl: string;
+  groupBuyType: string;
+  claimMode: ClaimMode;
+  canCancelClaim: boolean;
+  startAt: string;
   closeAt: string;
-  paymentChannelId: string;
+  saleMode: SaleMode;
+  allowTransfer: boolean;
+  remindBeforeStart: boolean;
+  showParticipantCount: boolean;
+  showTotalAmount: boolean;
+  showClaimedQuantity: boolean;
+}
+
+interface EditableItem {
+  localId: string;
+  persistedId?: string;
+  goodsId?: string | null;
+  name: string;
+  imageUrl: string;
+  localImagePreviewUrl?: string;
+  localImageName?: string;
+  unitPriceCny: string;
+  priceAdjustmentCny: string;
+  totalQuantity: string;
+  reservedQuantity: string;
+  weightGram: string;
+  characterNames: string[];
+  description: string;
+  note: string;
+  sourceName?: string;
+  sourceImageUrl?: string;
+  sourceWeightGram?: string;
+}
+
+const groupBuyTypes = ["群内开谷", "群内切煤", "国外全新", "国外二手", "群友出物", "国内现货", "补款", "补寄", "现货加开"];
+const claimModes: ClaimMode[] = ["拼盒", "单领"];
+const saleModes: SaleMode[] = ["全款", "定金尾款"];
+
+const initialForm: FormState = {
+  title: "",
+  description: "",
+  coverImageUrl: "",
+  groupBuyType: "群内开谷",
+  claimMode: "单领",
+  canCancelClaim: false,
+  startAt: "",
+  closeAt: "",
+  saleMode: "全款",
+  allowTransfer: false,
+  remindBeforeStart: true,
+  showParticipantCount: true,
+  showTotalAmount: true,
+  showClaimedQuantity: true,
+};
+
+function createLocalId(prefix = "local") {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function emptyEditableItem(): EditableItem {
+  return {
+    localId: createLocalId("item"),
+    name: "",
+    imageUrl: "",
+    unitPriceCny: "",
+    priceAdjustmentCny: "0",
+    totalQuantity: "1",
+    reservedQuantity: "0",
+    weightGram: "0",
+    characterNames: [],
+    description: "",
+    note: "",
+  };
+}
+
+function cleanMoney(value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return number.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function parseMoney(value: string) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function backendMoney(value: string | number) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    throw new Error("金额需要填写为不小于 0 的数字");
+  }
+  return number.toFixed(2);
+}
+
+function parsePositiveInt(value: string, label: string) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`${label}需要填写为大于 0 的整数`);
+  }
+  return number;
+}
+
+function parseNonNegativeInt(value: string, label: string) {
+  const number = Number(value || 0);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${label}需要填写为不小于 0 的整数`);
+  }
+  return number;
+}
+
+function toDateTimeLocal(value?: string | null) {
+  if (!value) return "";
+  return value.slice(0, 16);
+}
+
+function getItemImage(item: EditableItem) {
+  return item.localImagePreviewUrl || item.imageUrl;
+}
+
+function getItemFinalPrice(item: EditableItem, equalPriceEnabled: boolean, equalPrice: string) {
+  if (!equalPriceEnabled) return parseMoney(item.unitPriceCny);
+  return parseMoney(equalPrice) + parseMoney(item.priceAdjustmentCny);
+}
+
+function isSnapshotEdited(item: EditableItem) {
+  if (!item.goodsId) return false;
+  return (
+    (item.sourceName !== undefined && item.name !== item.sourceName) ||
+    (item.sourceImageUrl !== undefined && item.imageUrl !== item.sourceImageUrl) ||
+    (item.sourceWeightGram !== undefined && item.weightGram !== item.sourceWeightGram)
+  );
+}
+
+function itemFromGoods(goods: GoodsSummary): EditableItem {
+  const weight = goods.weightGram === null || goods.weightGram === undefined ? "0" : String(goods.weightGram);
+  const price = cleanMoney(goods.domesticSpotSuggestedPriceCny);
+  return {
+    localId: createLocalId("goods"),
+    goodsId: goods.id,
+    name: goods.name,
+    imageUrl: goods.mainImageUrl || "",
+    unitPriceCny: price,
+    priceAdjustmentCny: "0",
+    totalQuantity: "1",
+    reservedQuantity: "0",
+    weightGram: weight,
+    characterNames: goods.characterNames || [],
+    description: goods.description || "",
+    note: "",
+    sourceName: goods.name,
+    sourceImageUrl: goods.mainImageUrl || "",
+    sourceWeightGram: weight,
+  };
+}
+
+function itemFromDetail(item: GroupBuyItem): EditableItem {
+  const weight = item.weightGram ?? item.estimatedWeightGram ?? 0;
+  return {
+    localId: item.id,
+    persistedId: item.id,
+    goodsId: item.goodsId,
+    name: item.name,
+    imageUrl: item.imageUrl || "",
+    unitPriceCny: cleanMoney(item.unitPriceCny),
+    priceAdjustmentCny: "0",
+    totalQuantity: String(item.totalQuantity ?? 1),
+    reservedQuantity: String(item.reservedQuantity ?? 0),
+    weightGram: String(weight ?? 0),
+    characterNames: item.characterNames || (item.characterName ? [item.characterName] : []),
+    description: item.description || "",
+    note: item.note || "",
+    sourceName: item.name,
+    sourceImageUrl: item.imageUrl || "",
+    sourceWeightGram: String(weight ?? 0),
+  };
+}
+
+function createItemPayload(item: EditableItem, groupBuyId: string, equalPriceEnabled: boolean, equalPrice: string, includeGoodsId: boolean) {
+  const totalQuantity = parsePositiveInt(item.totalQuantity, "库存");
+  const reservedQuantity = parseNonNegativeInt(item.reservedQuantity, "预留库存");
+  if (reservedQuantity > totalQuantity) throw new Error("预留库存不能大于库存");
+
+  const weightGram = parseNonNegativeInt(item.weightGram || "0", "重量");
+  const unitPriceCny = backendMoney(getItemFinalPrice(item, equalPriceEnabled, equalPrice));
+  const imageUrl = item.imageUrl.trim();
+
+  return {
+    groupBuyId,
+    ...(includeGoodsId && item.goodsId ? { goodsId: item.goodsId } : {}),
+    name: item.name.trim(),
+    imageUrl: imageUrl || undefined,
+    unitPriceCny,
+    totalQuantity,
+    reservedQuantity,
+    weightGram,
+    characterNames: item.characterNames,
+    description: item.description.trim() || undefined,
+    note: item.note.trim() || undefined,
+    reason: "页面编辑谷子",
+  };
+}
+
+function validateItem(item: EditableItem, equalPriceEnabled: boolean, equalPrice: string) {
+  if (!item.name.trim()) throw new Error("请补全谷子名称");
+  const price = getItemFinalPrice(item, equalPriceEnabled, equalPrice);
+  if (!Number.isFinite(price) || price < 0) throw new Error(`${item.name || "谷子"} 的价格不正确`);
+  parsePositiveInt(item.totalQuantity, `${item.name || "谷子"}库存`);
+  parseNonNegativeInt(item.reservedQuantity, `${item.name || "谷子"}预留库存`);
+  parseNonNegativeInt(item.weightGram || "0", `${item.name || "谷子"}重量`);
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return <h2 className="px-1 text-sm font-semibold text-cyan-600">{children}</h2>;
+}
+
+function SettingPanel({ children }: { children: ReactNode }) {
+  return <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">{children}</div>;
+}
+
+function SettingRow({
+  label,
+  children,
+  onClick,
+  className,
+}: {
+  label: string;
+  children: ReactNode;
+  onClick?: () => void;
+  className?: string;
+}) {
+  return (
+    <button
+      className={cn(
+        "flex min-h-14 w-full items-center justify-between gap-4 border-t border-slate-100 px-4 py-3 text-left first:border-t-0",
+        onClick ? "hover:bg-slate-50" : "cursor-default",
+        className,
+      )}
+      onClick={onClick}
+      type="button"
+    >
+      <span className="text-sm font-semibold text-slate-950">{label}</span>
+      {children}
+    </button>
+  );
+}
+
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: T[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-md bg-slate-100 p-1">
+      {options.map((option) => (
+        <button
+          key={option}
+          className={cn(
+            "min-h-8 rounded px-3 text-sm font-semibold transition",
+            option === value ? "bg-white text-cyan-700 shadow-sm" : "text-slate-500 hover:text-slate-900",
+          )}
+          onClick={(event) => {
+            event.stopPropagation();
+            onChange(option);
+          }}
+          type="button"
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Toggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <button
+      aria-pressed={checked}
+      className={cn(
+        "relative h-7 w-12 rounded-full transition",
+        checked ? "bg-cyan-600" : "bg-slate-300",
+      )}
+      onClick={(event) => {
+        event.stopPropagation();
+        onChange(!checked);
+      }}
+      type="button"
+    >
+      <span
+        className={cn(
+          "absolute top-1 size-5 rounded-full bg-white shadow transition",
+          checked ? "left-6" : "left-1",
+        )}
+      />
+    </button>
+  );
+}
+
+function Modal({
+  open,
+  title,
+  children,
+  onClose,
+  wide = false,
+}: {
+  open: boolean;
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  wide?: boolean;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/35 p-3 sm:items-center">
+      <div
+        className={cn(
+          "max-h-[88vh] w-full overflow-hidden rounded-lg bg-white shadow-2xl",
+          wide ? "max-w-5xl" : "max-w-lg",
+        )}
+      >
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <h3 className="text-base font-semibold text-slate-950">{title}</h3>
+          <button className="btn btn-quiet size-9 p-0" onClick={onClose} type="button">
+            <X className="size-4" />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ImageTile({
+  title,
+  subtitle,
+  imageUrl,
+  onFile,
+}: {
+  title: string;
+  subtitle?: string;
+  imageUrl?: string;
+  onFile: (file: File) => void;
+}) {
+  return (
+    <label className="flex size-28 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-lg bg-slate-100 text-center text-slate-500 transition hover:bg-slate-200">
+      <input
+        accept="image/*"
+        className="sr-only"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) onFile(file);
+        }}
+        type="file"
+      />
+      {imageUrl ? (
+        <img alt="" className="size-full object-cover" src={imageUrl} />
+      ) : (
+        <>
+          <Plus className="size-9" />
+          <span className="mt-1 text-xs font-semibold">{title}</span>
+          {subtitle ? <span className="text-[11px]">{subtitle}</span> : null}
+        </>
+      )}
+    </label>
+  );
+}
+
+function PriceDisplay({
+  item,
+  equalPriceEnabled,
+  equalPrice,
+}: {
+  item: EditableItem;
+  equalPriceEnabled: boolean;
+  equalPrice: string;
+}) {
+  if (!equalPriceEnabled) {
+    return <span className="text-lg font-semibold text-rose-600">¥{cleanMoney(item.unitPriceCny) || "0"}</span>;
+  }
+
+  const adjustment = parseMoney(item.priceAdjustmentCny);
+  const adjustmentText = adjustment > 0 ? `+${cleanMoney(adjustment)}` : cleanMoney(adjustment);
+  return (
+    <span className="text-lg font-semibold">
+      <span className="text-slate-950">¥{cleanMoney(equalPrice) || "0"}</span>
+      <span className={cn("ml-1", adjustment > 0 ? "text-rose-600" : adjustment < 0 ? "text-sky-600" : "text-slate-400")}>
+        {adjustmentText}
+      </span>
+    </span>
+  );
+}
+
+function ItemCard({
+  item,
+  equalPriceEnabled,
+  equalPrice,
+  onEdit,
+  onCopy,
+  onDelete,
+}: {
+  item: EditableItem;
+  equalPriceEnabled: boolean;
+  equalPrice: string;
+  onEdit: () => void;
+  onCopy: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-lg border border-slate-200 bg-white p-3 sm:grid-cols-[92px_1fr]">
+      <div className="flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-slate-100 text-slate-400">
+        {getItemImage(item) ? (
+          <img alt="" className="size-full object-cover" src={getItemImage(item)} />
+        ) : (
+          <ImagePlus className="size-8" />
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h3 className="truncate text-base font-semibold text-slate-950">{item.name || "未命名谷子"}</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              库存:{item.totalQuantity || 0}
+              <span className="mx-2 text-slate-300">/</span>
+              预留:{item.reservedQuantity || 0}
+              <span className="mx-2 text-slate-300">/</span>
+              重量:{item.weightGram || 0}g
+            </p>
+            {item.characterNames.length ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {item.characterNames.slice(0, 3).map((name) => (
+                  <span className="badge-neutral" key={name}>{name}</span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <PriceDisplay equalPrice={equalPrice} equalPriceEnabled={equalPriceEnabled} item={item} />
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button className="min-h-8 px-3 py-1.5" onClick={onEdit} type="button" variant="secondary">
+            <Pencil className="size-4" />
+            编辑
+          </Button>
+          <Button className="min-h-8 px-3 py-1.5" onClick={onCopy} type="button" variant="secondary">
+            <Copy className="size-4" />
+            复制
+          </Button>
+          <Button className="min-h-8 px-3 py-1.5" onClick={onDelete} type="button" variant="secondary">
+            <Trash2 className="size-4" />
+            删除
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ItemEditorModal({
+  item,
+  equalPriceEnabled,
+  equalPrice,
+  onSave,
+  onClose,
+}: {
+  item: EditableItem | null;
+  equalPriceEnabled: boolean;
+  equalPrice: string;
+  onSave: (item: EditableItem) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<EditableItem | null>(item);
+
+  useEffect(() => setDraft(item), [item]);
+
+  if (!draft) return null;
+
+  const finalPrice = getItemFinalPrice(draft, equalPriceEnabled, equalPrice);
+
+  return (
+    <Modal onClose={onClose} open={Boolean(item)} title="编辑谷子">
+      <div className="max-h-[calc(88vh-73px)] overflow-y-auto p-5">
+        <div className="grid gap-4 sm:grid-cols-[120px_1fr]">
+          <ImageTile
+            imageUrl={getItemImage(draft)}
+            onFile={(file) => {
+              setDraft({
+                ...draft,
+                localImagePreviewUrl: URL.createObjectURL(file),
+                localImageName: file.name,
+              });
+            }}
+            subtitle={draft.localImageName}
+            title="上传图片"
+          />
+          <div className="space-y-3">
+            <TextInput
+              onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+              placeholder="谷子名称"
+              value={draft.name}
+            />
+            <TextInput
+              onChange={(event) => setDraft({ ...draft, imageUrl: event.target.value, localImagePreviewUrl: undefined })}
+              placeholder="图片地址"
+              value={draft.imageUrl}
+            />
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          {equalPriceEnabled ? (
+            <>
+              <label className="block">
+                <span className="mb-1.5 block text-sm font-medium text-slate-700">均价</span>
+                <TextInput disabled value={cleanMoney(equalPrice) || "0"} />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-sm font-medium text-slate-700">调价</span>
+                <TextInput
+                  inputMode="decimal"
+                  onChange={(event) => setDraft({ ...draft, priceAdjustmentCny: event.target.value })}
+                  placeholder="例如 2 或 -1"
+                  value={draft.priceAdjustmentCny}
+                />
+              </label>
+              <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 sm:col-span-2">
+                当前显示价 <span className="font-semibold text-slate-950">¥{cleanMoney(finalPrice)}</span>
+              </div>
+            </>
+          ) : (
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">价格</span>
+              <TextInput
+                inputMode="decimal"
+                onChange={(event) => setDraft({ ...draft, unitPriceCny: event.target.value })}
+                placeholder="0.00"
+                value={draft.unitPriceCny}
+              />
+            </label>
+          )}
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-slate-700">库存</span>
+            <TextInput
+              inputMode="numeric"
+              onChange={(event) => setDraft({ ...draft, totalQuantity: event.target.value })}
+              value={draft.totalQuantity}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-slate-700">预留库存</span>
+            <TextInput
+              inputMode="numeric"
+              onChange={(event) => setDraft({ ...draft, reservedQuantity: event.target.value })}
+              value={draft.reservedQuantity}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-slate-700">重量(g)</span>
+            <TextInput
+              inputMode="numeric"
+              onChange={(event) => setDraft({ ...draft, weightGram: event.target.value })}
+              placeholder="0"
+              value={draft.weightGram}
+            />
+          </label>
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={onClose} type="button" variant="secondary">取消</Button>
+          <Button
+            onClick={() => onSave({
+              ...draft,
+              unitPriceCny: equalPriceEnabled ? cleanMoney(finalPrice) : draft.unitPriceCny,
+              weightGram: draft.weightGram || "0",
+            })}
+            type="button"
+          >
+            保存
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function GoodsImportModal({
+  open,
+  onClose,
+  onAdd,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdd: (items: GoodsSummary[]) => void;
+}) {
+  const [keyword, setKeyword] = useState("");
+  const [characterName, setCharacterName] = useState("");
+  const [seriesName, setSeriesName] = useState("");
+  const [status, setStatus] = useState("enabled");
+  const [selected, setSelected] = useState<Map<string, GoodsSummary>>(new Map());
+  const deferredKeyword = useDeferredValue(keyword);
+
+  const query = useQuery({
+    queryKey: ["goods-import", deferredKeyword, characterName, seriesName, status],
+    queryFn: () => api.searchGoods({
+      keyword: deferredKeyword,
+      characterName,
+      seriesName,
+      status,
+      pageSize: 50,
+    }),
+    enabled: open,
+    placeholderData: keepPreviousData,
+  });
+
+  useEffect(() => {
+    if (!open) setSelected(new Map());
+  }, [open]);
+
+  const selectedItems = Array.from(selected.values());
+
+  return (
+    <Modal onClose={onClose} open={open} title="从商品库导入" wide>
+      <div className="grid max-h-[calc(88vh-73px)] grid-rows-[auto_1fr_auto] overflow-hidden">
+        <div className="border-b border-slate-200 p-4">
+          <div className="grid gap-3 lg:grid-cols-[1fr_180px_180px_140px]">
+            <SearchBox onChange={setKeyword} placeholder="搜索商品名、别名、系列" value={keyword} />
+            <TextInput onChange={(event) => setCharacterName(event.target.value)} placeholder="角色筛选" value={characterName} />
+            <TextInput onChange={(event) => setSeriesName(event.target.value)} placeholder="系列筛选" value={seriesName} />
+            <SelectInput onChange={(event) => setStatus(event.target.value)} value={status}>
+              <option value="">全部状态</option>
+              <option value="enabled">启用</option>
+              <option value="draft">草稿</option>
+              <option value="disabled">停用</option>
+            </SelectInput>
+          </div>
+        </div>
+
+        <div className="overflow-y-auto bg-slate-50 p-4">
+          {query.isLoading ? <LoadingRows rows={4} /> : null}
+          {query.isError ? <ErrorState title="商品库加载失败" description={query.error.message} /> : null}
+          {query.data?.items.length === 0 ? <EmptyState title="暂无商品" description="当前筛选下没有可导入商品。" /> : null}
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {query.data?.items.map((goods) => {
+              const checked = selected.has(goods.id);
+              return (
+                <button
+                  className={cn(
+                    "grid grid-cols-[76px_1fr] gap-3 rounded-lg border bg-white p-3 text-left transition",
+                    checked ? "border-cyan-500 ring-2 ring-cyan-100" : "border-slate-200 hover:border-cyan-300",
+                  )}
+                  key={goods.id}
+                  onClick={() => {
+                    setSelected((current) => {
+                      const next = new Map(current);
+                      if (next.has(goods.id)) next.delete(goods.id);
+                      else next.set(goods.id, goods);
+                      return next;
+                    });
+                  }}
+                  type="button"
+                >
+                  <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-slate-100 text-slate-400">
+                    {goods.mainImageUrl ? <img alt="" className="size-full object-cover" src={goods.mainImageUrl} /> : <ImagePlus className="size-7" />}
+                    <span className={cn(
+                      "absolute right-1.5 top-1.5 flex size-5 items-center justify-center rounded-full border bg-white",
+                      checked ? "border-cyan-500 text-cyan-600" : "border-slate-300 text-transparent",
+                    )}>
+                      <Check className="size-3.5" />
+                    </span>
+                  </div>
+                  <div className="min-w-0">
+                    <h4 className="truncate text-sm font-semibold text-slate-950">{goods.name}</h4>
+                    <p className="mt-1 truncate text-xs text-slate-500">{goods.seriesName || "未分系列"}</p>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {goods.characterNames?.slice(0, 2).map((name) => (
+                        <span className="badge-neutral" key={name}>{name}</span>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {goods.weightGram ?? 0}g
+                      {goods.domesticSpotSuggestedPriceCny ? ` · ¥${cleanMoney(goods.domesticSpotSuggestedPriceCny)}` : ""}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm text-slate-600">已选择 <span className="font-semibold text-cyan-700">{selectedItems.length}</span> 个商品</div>
+          <div className="flex gap-2">
+            <Button onClick={onClose} type="button" variant="secondary">退出</Button>
+            <Button disabled={selectedItems.length === 0} onClick={() => onAdd(selectedItems)} type="button">
+              添加
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 export function GroupBuyFormPage() {
-  const params = useParams({ strict: false }) as { groupBuyId?: string };
+  const params = useParams({ strict: false }) as { groupId?: string; groupBuyId?: string };
+  const routeGroupId = params.groupId;
   const groupBuyId = params.groupBuyId;
   const navigate = useNavigate();
-  const groupsQuery = useQuery({ queryKey: ["groups"], queryFn: () => api.getGroups() });
+  const [form, setForm] = useState<FormState>(initialForm);
+  const [items, setItems] = useState<EditableItem[]>([]);
+  const [itemsExpanded, setItemsExpanded] = useState(false);
+  const [equalPriceEnabled, setEqualPriceEnabled] = useState(false);
+  const [equalPrice, setEqualPrice] = useState("");
+  const [editingItem, setEditingItem] = useState<EditableItem | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [coverPreviewUrl, setCoverPreviewUrl] = useState("");
+  const [coverFileName, setCoverFileName] = useState("");
+  const [deleteWarning, setDeleteWarning] = useState("");
+
   const detailQuery = useQuery({
     queryKey: ["group-buy-detail", groupBuyId],
     queryFn: () => api.getGroupBuyDetail(groupBuyId || ""),
     enabled: Boolean(groupBuyId),
   });
-  const form = useForm<FormValues>({
-    defaultValues: {
-      groupId: "",
-      type: "群内开谷",
-      title: "",
-      description: "",
-      closeAt: "2026-07-01T20:00",
-      paymentChannelId: "",
-    },
+  const groupsQuery = useQuery({
+    queryKey: ["groups"],
+    queryFn: () => api.getGroups(),
+    enabled: !routeGroupId && !groupBuyId,
   });
 
-  useEffect(() => {
-    const firstGroup = groupsQuery.data?.items[0];
-    if (firstGroup && !form.getValues("groupId")) form.setValue("groupId", firstGroup.id);
-  }, [form, groupsQuery.data]);
+  const activeGroupId = routeGroupId || detailQuery.data?.groupBuy.groupId || groupsQuery.data?.items[0]?.id || "";
+  const groupHomeQuery = useQuery({
+    queryKey: ["group-home", activeGroupId],
+    queryFn: () => api.getGroupHome(activeGroupId),
+    enabled: Boolean(activeGroupId),
+  });
 
   useEffect(() => {
     if (!detailQuery.data) return;
-    form.reset({
-      groupId: detailQuery.data.groupBuy.groupId,
-      type: detailQuery.data.groupBuy.type,
-      title: detailQuery.data.groupBuy.title,
-      description: detailQuery.data.groupBuy.description || "",
-      closeAt: detailQuery.data.groupBuy.closeAt.slice(0, 16),
-      paymentChannelId: detailQuery.data.groupBuy.paymentChannelId || "",
-    });
-  }, [detailQuery.data, form]);
+    const detail = detailQuery.data;
+    setForm((current) => ({
+      ...current,
+      title: detail.groupBuy.title,
+      description: detail.groupBuy.description || "",
+      groupBuyType: detail.groupBuy.type,
+      closeAt: toDateTimeLocal(detail.groupBuy.closeAt),
+    }));
+    setItems(detail.items.map(itemFromDetail));
+    setItemsExpanded(detail.items.length > 0);
+  }, [detailQuery.data]);
 
-  const save = useMutation<{ groupBuyId?: string; ok?: true }, Error, FormValues>({
-    mutationFn: (values: FormValues) =>
-      groupBuyId ? api.updateGroupBuy(groupBuyId, values) : api.createGroupBuy(values),
-    onSuccess: (result) => {
-      const nextId =
-        groupBuyId ||
-        ("groupBuyId" in result && typeof result.groupBuyId === "string"
-          ? result.groupBuyId
-          : undefined);
-      if (nextId) void navigate({ to: "/app/group-buys/$groupBuyId", params: { groupBuyId: nextId } });
+  const firstItem = items[0];
+  const hiddenItemCount = Math.max(items.length - 1, 0);
+  const groupName = groupHomeQuery.data?.group.name || groupsQuery.data?.items.find((group) => group.id === activeGroupId)?.name;
+
+  const currentGroupChanged = useMemo(() => {
+    if (!groupBuyId || !detailQuery.data) return true;
+    const original = detailQuery.data.groupBuy;
+    return (
+      form.title !== original.title ||
+      form.description !== (original.description || "") ||
+      form.groupBuyType !== original.type ||
+      form.closeAt !== toDateTimeLocal(original.closeAt)
+    );
+  }, [detailQuery.data, form.closeAt, form.description, form.groupBuyType, form.title, groupBuyId]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const groupId = activeGroupId;
+      if (!groupId) throw new Error("请从谷团详情页进入新建拼团");
+      if (form.title.trim().length < 2) throw new Error("请填写至少 2 个字的拼团标题");
+      if (equalPriceEnabled && !equalPrice.trim()) throw new Error("开启均价后需要填写均价");
+      items.forEach((item) => validateItem(item, equalPriceEnabled, equalPrice));
+
+      const basePayload = {
+        groupId,
+        type: form.groupBuyType,
+        title: form.title.trim(),
+        description: form.description.trim(),
+        closeAt: form.closeAt,
+        startAt: form.startAt,
+        coverImageUrl: form.coverImageUrl,
+        claimMode: form.claimMode,
+        canCancelClaim: form.canCancelClaim,
+        saleMode: form.saleMode,
+        allowTransfer: form.allowTransfer,
+        advancedSettings: {
+          remindBeforeStart: form.remindBeforeStart,
+          showParticipantCount: form.showParticipantCount,
+          showTotalAmount: form.showTotalAmount,
+          showClaimedQuantity: form.showClaimedQuantity,
+        },
+        reason: "页面编辑拼团",
+      };
+
+      let nextGroupBuyId = groupBuyId;
+      if (groupBuyId) {
+        if (currentGroupChanged) await api.updateGroupBuy(groupBuyId, basePayload);
+      } else {
+        const created = await api.createGroupBuy(basePayload);
+        nextGroupBuyId = created.groupBuyId;
+      }
+
+      if (!nextGroupBuyId) throw new Error("后端没有返回拼团 ID");
+
+      for (const item of items) {
+        const includeGoodsId = Boolean(item.goodsId && !item.persistedId);
+        if (item.persistedId) {
+          await api.updateGroupBuyItem(
+            item.persistedId,
+            createItemPayload(item, nextGroupBuyId, equalPriceEnabled, equalPrice, false),
+          );
+          continue;
+        }
+
+        const createdItem = await api.createGroupBuyItem(
+          createItemPayload(item, nextGroupBuyId, equalPriceEnabled, equalPrice, includeGoodsId),
+        );
+
+        if (item.goodsId && isSnapshotEdited(item) && createdItem.groupBuyItemId) {
+          await api.updateGroupBuyItem(
+            createdItem.groupBuyItemId,
+            createItemPayload(item, nextGroupBuyId, equalPriceEnabled, equalPrice, false),
+          );
+        }
+      }
+
+      return nextGroupBuyId;
+    },
+    onSuccess: (nextGroupBuyId) => {
+      void navigate({ to: "/app/group-buys/$groupBuyId", params: { groupBuyId: nextGroupBuyId } });
     },
   });
 
-  if (groupsQuery.isLoading || detailQuery.isLoading) return <LoadingRows rows={2} />;
-  if (groupsQuery.isError) return <ErrorState title="无法读取谷团" description={groupsQuery.error.message} />;
+  function updateForm(patch: Partial<FormState>) {
+    setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function toggleEqualPrice() {
+    if (equalPriceEnabled) {
+      setItems((current) => current.map((item) => ({
+        ...item,
+        unitPriceCny: cleanMoney(getItemFinalPrice(item, true, equalPrice)),
+        priceAdjustmentCny: "0",
+      })));
+      setEqualPriceEnabled(false);
+      return;
+    }
+
+    const nextEqualPrice = equalPrice || items[0]?.unitPriceCny || "0";
+    setEqualPrice(cleanMoney(nextEqualPrice));
+    setItems((current) => current.map((item) => ({
+      ...item,
+      priceAdjustmentCny: cleanMoney(parseMoney(item.unitPriceCny) - parseMoney(nextEqualPrice)),
+    })));
+    setEqualPriceEnabled(true);
+  }
+
+  function upsertItem(nextItem: EditableItem) {
+    setItems((current) => {
+      const exists = current.some((item) => item.localId === nextItem.localId);
+      if (exists) return current.map((item) => item.localId === nextItem.localId ? nextItem : item);
+      return [...current, nextItem];
+    });
+    setItemsExpanded(true);
+    setEditingItem(null);
+  }
+
+  function copyItem(item: EditableItem) {
+    setItems((current) => [
+      ...current,
+      {
+        ...item,
+        localId: createLocalId("copy"),
+        persistedId: undefined,
+        name: `${item.name} 复制`,
+      },
+    ]);
+    setItemsExpanded(true);
+  }
+
+  function deleteItem(item: EditableItem) {
+    if (item.persistedId) {
+      setDeleteWarning("已保存谷子的删除接口后端暂未提供，当前只能删除本次新加的谷子。");
+      return;
+    }
+    setItems((current) => current.filter((candidate) => candidate.localId !== item.localId));
+  }
+
+  if (detailQuery.isLoading || groupsQuery.isLoading) return <LoadingRows rows={3} />;
   if (detailQuery.isError) return <ErrorState title="无法读取拼团" description={detailQuery.error.message} />;
+  if (groupsQuery.isError) return <ErrorState title="无法读取谷团" description={groupsQuery.error.message} />;
+  if (!activeGroupId) {
+    return (
+      <ErrorState
+        title="缺少谷团上下文"
+        description="新建拼团需要从谷团详情页进入。"
+        action={<Link className="btn btn-primary" to="/app/groups">返回谷团</Link>}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-5">
+    <div className="mx-auto max-w-4xl space-y-4">
       <PageHeader
+        action={<Link className="btn btn-secondary" params={{ groupId: activeGroupId }} to="/app/groups/$groupId">返回谷团</Link>}
+        description={groupName ? `当前谷团：${groupName}` : undefined}
         title={groupBuyId ? "编辑拼团" : "新建拼团"}
-        description="基础信息、收款方式、商品和库存都在这个页面完成。商品条目使用后端拼团商品接口逐步接入。"
-        action={<Link to="/app/goods" className="btn btn-secondary">打开商品图鉴</Link>}
       />
+
       <Surface className="p-5">
-        <form className="grid gap-4 lg:grid-cols-2" onSubmit={form.handleSubmit((values) => save.mutate(values))}>
-          <Field label="所属谷团">
-            <SelectInput {...form.register("groupId")}>
-              {groupsQuery.data?.items.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
-            </SelectInput>
-          </Field>
-          <Field label="拼团类型">
-            <SelectInput {...form.register("type")}>
-              <option>群内开谷</option>
-              <option>补款</option>
-              <option>现货加开</option>
-              <option>补寄</option>
-            </SelectInput>
-          </Field>
-          <Field label="标题"><TextInput {...form.register("title", { required: true })} /></Field>
-          <Field label="截团时间"><TextInput type="datetime-local" {...form.register("closeAt")} /></Field>
-          <Field label="收款方式 ID"><TextInput {...form.register("paymentChannelId")} placeholder="选择已有收款方式后填入" /></Field>
-          <div className="flex items-end"><Link to="/app/me/payment-channels" className="btn btn-secondary">管理/新建收款方式</Link></div>
-          <Field label="说明"><TextArea {...form.register("description")} /></Field>
-          <Surface className="p-4">
-            <h3 className="font-semibold text-slate-950">商品与库存</h3>
-            <p className="mt-2 text-sm leading-6 text-slate-600">保存拼团后，可通过 `/api/group-buy-items` 创建商品、库存和内定库存。后续可继续把这里做成可编辑表格。</p>
-          </Surface>
-          {save.error ? <p className="text-sm text-rose-600 lg:col-span-2">{save.error.message}</p> : null}
-          <div className="flex gap-2 lg:col-span-2">
-            <Button busy={save.isPending} type="submit">保存</Button>
-            <Button type="button" variant="secondary" onClick={() => form.reset()}>重置</Button>
+        <div className="space-y-4">
+          <TextInput
+            className="border-0 border-b border-slate-200 px-0 text-base font-semibold shadow-none focus:border-cyan-600 focus:ring-0"
+            onChange={(event) => updateForm({ title: event.target.value })}
+            placeholder="填写拼团标题"
+            value={form.title}
+          />
+          <TextArea
+            className="min-h-28 border-0 px-0 shadow-none focus:ring-0"
+            onChange={(event) => updateForm({ description: event.target.value })}
+            placeholder="填写拼团的规则和内容"
+            value={form.description}
+          />
+          <div className="flex flex-wrap items-end gap-3">
+            <ImageTile
+              imageUrl={coverPreviewUrl || form.coverImageUrl}
+              onFile={(file) => {
+                setCoverPreviewUrl(URL.createObjectURL(file));
+                setCoverFileName(file.name);
+              }}
+              subtitle={coverFileName}
+              title="上传活动主图"
+            />
+            <div className="min-w-64 flex-1">
+              <TextInput
+                onChange={(event) => {
+                  setCoverPreviewUrl("");
+                  setCoverFileName("");
+                  updateForm({ coverImageUrl: event.target.value });
+                }}
+                placeholder="活动主图地址"
+                value={form.coverImageUrl}
+              />
+            </div>
           </div>
-        </form>
+        </div>
       </Surface>
+
+      <SectionLabel>谷子设置</SectionLabel>
+      <SettingPanel>
+        <SettingRow label="拼谷类型">
+          <Segmented onChange={(value) => updateForm({ claimMode: value })} options={claimModes} value={form.claimMode} />
+        </SettingRow>
+        <SettingRow label="能否撤排">
+          <Segmented
+            onChange={(value) => updateForm({ canCancelClaim: value === "可撤排" })}
+            options={["可撤排", "不可撤排"]}
+            value={form.canCancelClaim ? "可撤排" : "不可撤排"}
+          />
+        </SettingRow>
+        <SettingRow className="relative" label="谷子种类" onClick={() => setItemsExpanded((value) => !value)}>
+          <div className="flex min-w-0 items-center gap-2 text-right text-sm text-slate-500">
+            {firstItem ? (
+              <span className="max-w-48 truncate">{firstItem.name || "未命名谷子"}</span>
+            ) : (
+              <span>请添加谷子</span>
+            )}
+            {itemsExpanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          </div>
+          {!itemsExpanded && hiddenItemCount > 0 ? (
+            <span className="absolute bottom-1.5 right-9 text-[11px] font-semibold text-cyan-600">+{hiddenItemCount}</span>
+          ) : null}
+        </SettingRow>
+      </SettingPanel>
+
+      {itemsExpanded ? (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => setImportOpen(true)} type="button" variant="secondary">
+                <Library className="size-4" />
+                商品库导入
+              </Button>
+              <Button onClick={() => setEditingItem(emptyEditableItem())} type="button" variant="secondary">
+                <PackagePlus className="size-4" />
+                添加谷子
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className={cn(
+                  "inline-flex min-h-10 items-center gap-2 rounded-md px-3.5 py-2 text-sm font-semibold transition",
+                  equalPriceEnabled ? "bg-cyan-600 text-white" : "bg-slate-200 text-slate-600 hover:bg-slate-300",
+                )}
+                onClick={toggleEqualPrice}
+                type="button"
+              >
+                均价
+              </button>
+              {equalPriceEnabled ? (
+                <TextInput
+                  className="w-32"
+                  inputMode="decimal"
+                  onChange={(event) => setEqualPrice(event.target.value)}
+                  placeholder="均价"
+                  value={equalPrice}
+                />
+              ) : null}
+            </div>
+          </div>
+
+          {deleteWarning ? (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {deleteWarning}
+            </div>
+          ) : null}
+
+          <div className="mt-4 space-y-3">
+            {items.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
+                还没有谷子，先从商品库导入或添加一个新 item。
+              </div>
+            ) : null}
+            {items.map((item) => (
+              <ItemCard
+                equalPrice={equalPrice}
+                equalPriceEnabled={equalPriceEnabled}
+                item={item}
+                key={item.localId}
+                onCopy={() => copyItem(item)}
+                onDelete={() => deleteItem(item)}
+                onEdit={() => setEditingItem(item)}
+              />
+            ))}
+            {items.length > 0 ? <div className="py-2 text-center text-sm text-slate-500">没有更多了</div> : null}
+          </div>
+        </div>
+      ) : null}
+
+      <SectionLabel>活动设置</SectionLabel>
+      <SettingPanel>
+        <SettingRow label="业务类型">
+          <SelectInput
+            className="w-36"
+            onChange={(event) => updateForm({ groupBuyType: event.target.value })}
+            value={form.groupBuyType}
+          >
+            {groupBuyTypes.map((type) => <option key={type}>{type}</option>)}
+          </SelectInput>
+        </SettingRow>
+        <SettingRow label="开始时间">
+          <TextInput
+            className="w-52"
+            onChange={(event) => updateForm({ startAt: event.target.value })}
+            type="datetime-local"
+            value={form.startAt}
+          />
+        </SettingRow>
+        <SettingRow label="结束时间">
+          <TextInput
+            className="w-52"
+            onChange={(event) => updateForm({ closeAt: event.target.value })}
+            type="datetime-local"
+            value={form.closeAt}
+          />
+        </SettingRow>
+      </SettingPanel>
+
+      <SectionLabel>售卖方式</SectionLabel>
+      <SettingPanel>
+        <SettingRow label="交易流程">
+          <Segmented onChange={(value) => updateForm({ saleMode: value })} options={saleModes} value={form.saleMode} />
+        </SettingRow>
+      </SettingPanel>
+
+      <SectionLabel>转单设置</SectionLabel>
+      <SettingPanel>
+        <SettingRow label="允许团员转单">
+          <Toggle checked={form.allowTransfer} onChange={(value) => updateForm({ allowTransfer: value })} />
+        </SettingRow>
+      </SettingPanel>
+
+      <SectionLabel>高级设置</SectionLabel>
+      <SettingPanel>
+        <SettingRow label="开启活动参与提醒">
+          <Toggle checked={form.remindBeforeStart} onChange={(value) => updateForm({ remindBeforeStart: value })} />
+        </SettingRow>
+        <SettingRow label="显示参与人数">
+          <Toggle checked={form.showParticipantCount} onChange={(value) => updateForm({ showParticipantCount: value })} />
+        </SettingRow>
+        <SettingRow label="显示总子余量">
+          <Toggle checked={form.showTotalAmount} onChange={(value) => updateForm({ showTotalAmount: value })} />
+        </SettingRow>
+        <SettingRow label="显示谷子已排数量">
+          <Toggle checked={form.showClaimedQuantity} onChange={(value) => updateForm({ showClaimedQuantity: value })} />
+        </SettingRow>
+      </SettingPanel>
+
+      {save.error ? <ErrorState title="保存失败" description={save.error.message} /> : null}
+
+      <div className="sticky bottom-20 z-20 flex justify-end gap-2 rounded-lg border border-slate-200 bg-white/90 p-3 shadow-lg backdrop-blur md:bottom-4">
+        <Button onClick={() => setForm(initialForm)} type="button" variant="secondary">重置</Button>
+        <Button busy={save.isPending} onClick={() => save.mutate()} type="button">
+          <Upload className="size-4" />
+          保存拼团
+        </Button>
+      </div>
+
+      <ItemEditorModal
+        equalPrice={equalPrice}
+        equalPriceEnabled={equalPriceEnabled}
+        item={editingItem}
+        onClose={() => setEditingItem(null)}
+        onSave={upsertItem}
+      />
+      <GoodsImportModal
+        onAdd={(goodsItems) => {
+          setItems((current) => [...current, ...goodsItems.map(itemFromGoods)]);
+          setItemsExpanded(true);
+          setImportOpen(false);
+        }}
+        onClose={() => setImportOpen(false)}
+        open={importOpen}
+      />
     </div>
   );
 }
