@@ -20,11 +20,13 @@ if __package__ in {None, ""}:
     from server.config import load_config
     from server.db_bootstrap import describe_database_target, initialize_database_schema
     from server.errors import AppError
+    from server.upload_parser import parse_multipart_upload
 else:
     from .app_context import AppContext
     from .config import load_config
     from .db_bootstrap import describe_database_target, initialize_database_schema
     from .errors import AppError
+    from .upload_parser import parse_multipart_upload
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG = load_config(ROOT_DIR)
@@ -119,26 +121,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         raw = b""
 
         if content_type.startswith("multipart/form-data"):
-            import cgi
-
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": content_type,
-                    "CONTENT_LENGTH": str(content_length),
-                },
+            bucket, filename, file_content_type, raw = parse_multipart_upload(
+                content_type,
+                self.rfile.read(content_length),
             )
-            bucket_field = form["bucket"] if "bucket" in form else None
-            if bucket_field is not None and not bucket_field.filename:
-                bucket = str(bucket_field.value or "misc")
-            file_field = form["file"] if "file" in form else None
-            if file_field is None or not file_field.filename:
-                raise AppError(400, "multipart 请求需要包含 file 字段", "VALIDATION_FAILED")
-            filename = Path(file_field.filename).name or filename
-            file_content_type = file_field.type or file_content_type
-            raw = file_field.file.read()
         else:
             bucket = self.headers.get("X-Upload-Bucket") or "misc"
             filename = self.headers.get("X-Upload-Filename") or filename
