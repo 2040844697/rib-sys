@@ -1,91 +1,45 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
 
-import { GroupCard } from "@/components/cards";
-import {
-  CardSkeleton,
-  EmptyState,
-  ErrorState,
-  Panel,
-  SectionHeading,
-} from "@/components/ui";
 import { api } from "@/lib/api";
-import { useAuthState } from "@/lib/auth-store";
-import { runtimeModeLabel } from "@/lib/runtime";
+import { EmptyState, ErrorState, LoadingRows, PageHeader, RoleBadge, StatBlock, Surface } from "@/components/ui";
 
 export function GroupsPage() {
-  const auth = useAuthState();
-  const groupsQuery = useQuery({
-    queryKey: ["groups"],
-    queryFn: () => api.getGroups(),
-  });
+  const query = useQuery({ queryKey: ["groups"], queryFn: () => api.getGroups() });
 
   return (
-    <div className="space-y-6">
-      <SectionHeading
-        eyebrow="谷团"
-        title="选择你要进入的谷团"
-        description="当前每个谷团卡片都会直接展示我的角色、成员规模和活跃拼团数量，方便手机端快速扫读。"
-      />
-
-      <Panel className="p-6" strong>
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <div className="text-sm font-semibold text-slate-900">
-              {auth.user?.displayName ?? "当前用户"}
-            </div>
-            <p className="mt-2 text-sm leading-7 text-slate-600">
-              第一阶段的谷团列表优先突出“进入详情”这个动作。后续如果谷团数量变多，可以继续追加搜索、
-              分组和最近访问等能力。
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-            <div className="rounded-[22px] bg-white/80 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">我的角色</div>
-              <div className="mt-2 text-lg font-semibold text-slate-900">
-                {(auth.user?.roles ?? []).length}
+    <div className="space-y-5">
+      <PageHeader title="谷团" description="当前即使只有一个谷团，也按列表设计，方便后续扩展多团。" />
+      {query.isLoading ? <LoadingRows rows={2} /> : null}
+      {query.isError ? <ErrorState title="谷团列表加载失败" description={query.error.message} /> : null}
+      {query.data?.items.length === 0 ? <EmptyState title="暂无谷团" description="后端没有返回当前用户可见的谷团。" /> : null}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {query.data?.items.map((group) => (
+          <Link key={group.id} to="/app/groups/$groupId" params={{ groupId: group.id }} className="block">
+            <Surface className="p-5 hover:border-cyan-300">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex gap-4">
+                  <div className="flex size-14 shrink-0 items-center justify-center rounded-lg bg-cyan-50 text-xl font-semibold text-cyan-800">
+                    {group.name.slice(0, 1)}
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-950">{group.name}</h2>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {group.myRoles.map((role) => <RoleBadge key={role} role={role} />)}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="size-5 text-slate-400" />
               </div>
-            </div>
-            <div className="rounded-[22px] bg-[var(--accent-soft)] p-4 text-[var(--accent-strong)]">
-              <div className="text-xs uppercase tracking-[0.2em]">当前模式</div>
-              <div className="mt-2 text-lg font-semibold">{runtimeModeLabel}</div>
-            </div>
-          </div>
-        </div>
-      </Panel>
-
-      {groupsQuery.isLoading ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <CardSkeleton lines={4} />
-          <CardSkeleton lines={4} />
-        </div>
-      ) : null}
-
-      {groupsQuery.isError ? (
-        <ErrorState
-          title="谷团列表加载失败"
-          description={groupsQuery.error.message}
-          action={
-            <button className="button-secondary" onClick={() => groupsQuery.refetch()}>
-              重试
-            </button>
-          }
-        />
-      ) : null}
-
-      {groupsQuery.data && groupsQuery.data.items.length === 0 ? (
-        <EmptyState
-          title="暂无可见谷团"
-          description="这里后续可以根据角色展示加入入口或申请提示。"
-        />
-      ) : null}
-
-      {groupsQuery.data && groupsQuery.data.items.length > 0 ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {groupsQuery.data.items.map((group) => (
-            <GroupCard key={group.id} group={group} />
-          ))}
-        </div>
-      ) : null}
+              <div className="mt-5 grid grid-cols-2 gap-3">
+                <StatBlock label="成员数" value={group.memberCount} />
+                <StatBlock label="进行中拼团" value={group.activeGroupBuyCount} />
+              </div>
+            </Surface>
+          </Link>
+        ))}
+      </div>
     </div>
   );
 }

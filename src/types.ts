@@ -1,16 +1,14 @@
-export type UserRole =
-  | "member"
-  | "group_buy_maintainer"
-  | "stock_keeper"
-  | "admin";
+export type UserRole = "member" | "group_buy_maintainer" | "stock_keeper" | "admin";
 
 export interface CurrentUser {
   id: string;
-  account: string;
+  account?: string;
   displayName: string;
   qqNumber: string;
   groupNickname: string;
   roles: UserRole[];
+  status?: string;
+  groupId?: string;
 }
 
 export interface LoginRequest {
@@ -67,10 +65,10 @@ export interface GroupHomeResponse {
   group: {
     id: string;
     name: string;
-    description: string;
+    description?: string | null;
     coverImageUrl: string | null;
     leader: {
-      id: string;
+      id: string | null;
       displayName: string;
     };
     memberCount: number;
@@ -93,6 +91,11 @@ export interface GroupBuyListItem {
   title: string;
   type: string;
   status: string;
+  initiator?: {
+    id?: string;
+    displayName: string;
+  };
+  ownerName?: string;
   closeAt: string;
   itemCount: number;
   availableQuantity: number;
@@ -118,12 +121,17 @@ export interface AdminCapabilitiesResponse {
 
 export interface GroupBuyItem {
   id: string;
+  goodsId?: string | null;
   name: string;
-  characterName: string;
+  alias?: string | null;
+  characterName?: string;
+  characterNames?: string[];
   imageUrl: string | null;
   unitPriceCny: string;
+  estimatedWeightGram?: number | null;
   totalQuantity: number;
   claimedQuantity: number;
+  reservedQuantity?: number;
   availableQuantity: number;
   status: string;
 }
@@ -143,8 +151,10 @@ export interface GroupBuyDetailResponse {
     title: string;
     type: string;
     status: string;
-    description: string;
+    description?: string | null;
     closeAt: string;
+    paymentChannelId?: string | null;
+    stockKeeperUserId?: string | null;
   };
   items: GroupBuyItem[];
   myRecords: GroupBuyRecord[];
@@ -156,23 +166,50 @@ export interface GroupBuyDetailResponse {
   };
 }
 
+export interface GoodsSummary {
+  id: string;
+  name: string;
+  seriesName?: string | null;
+  aliases?: string[];
+  characterNames?: string[];
+  sku?: string | null;
+  description?: string | null;
+  mainImageUrl?: string | null;
+  weightGram?: number | null;
+  domesticSpotSuggestedPriceCny?: string | null;
+  status: string;
+  imageCount?: number;
+  updatedAt?: string;
+}
+
+export interface GoodsSearchResponse {
+  items: GoodsSummary[];
+  total: number;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AuditLogItem {
+  id: string;
+  actorUserId?: string | null;
+  actorName?: string | null;
+  action: string;
+  objectType: string;
+  objectId?: string | null;
+  reason?: string | null;
+  createdAt: string;
+}
+
+export interface ListResponse<T> {
+  items: T[];
+  total?: number;
+}
+
 export interface ClaimGroupBuyPayload {
   groupBuyId: string;
   groupBuyItemId: string;
   quantity: number;
 }
-
-export interface ClaimGroupBuyResponse {
-  recordId: string;
-  displayStatus: string;
-}
-
-export interface UpdateMePayload {
-  displayName: string;
-  groupNickname: string;
-}
-
-export type MeResponse = CurrentUser;
 
 export interface GroupBuyCreatePayload {
   groupId: string;
@@ -180,10 +217,16 @@ export interface GroupBuyCreatePayload {
   title: string;
   description: string;
   closeAt: string;
-  defaultChannel: string;
-  defaultStockKeeper: string;
+  paymentChannelId?: string;
+  defaultChannel?: string;
+  defaultStockKeeper?: string;
 }
 
 export interface GroupBuyCreateResponse {
   groupBuyId: string;
+}
+
+export interface UpdateMePayload {
+  displayName: string;
+  groupNickname: string;
 }

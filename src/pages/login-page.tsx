@@ -6,44 +6,28 @@ import { useForm } from "react-hook-form";
 import { ArrowRight } from "lucide-react";
 import { z } from "zod";
 
+import { Button, Field, Surface, TextInput } from "@/components/ui";
 import { authStore, useAuthState } from "@/lib/auth-store";
-import { isDevelopment, runtimeModeLabel } from "@/lib/runtime";
-import { Button, Field, Panel, TextInput } from "@/components/ui";
 
-const loginSchema = z.object({
+const schema = z.object({
   account: z.string().trim().min(1, "请输入账号"),
-  password: z.string().min(6, "密码至少 6 位"),
+  password: z.string().min(1, "请输入密码"),
 });
 
-type LoginFormValues = z.infer<typeof loginSchema>;
+type FormValues = z.infer<typeof schema>;
 
-const demoAccounts = [
-  { account: "member", label: "普通成员" },
-  { account: "maintainer", label: "拼单维护人" },
-  { account: "stock", label: "囤货人" },
-  { account: "admin", label: "管理员" },
-];
+const demoAccounts = ["member", "maintainer", "stock", "admin"];
 
 export function LoginPage() {
   const auth = useAuthState();
   const navigate = useNavigate();
-  const showDevAccounts = isDevelopment;
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-    setValue,
-  } = useForm<LoginFormValues>({
-    resolver: zodResolver(loginSchema),
-    defaultValues: {
-      account: "",
-      password: "",
-    },
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: { account: "", password: "" },
   });
 
-  const loginMutation = useMutation({
-    mutationFn: (values: LoginFormValues) => authStore.login(values),
+  const mutation = useMutation({
+    mutationFn: (values: FormValues) => authStore.login(values),
     onSuccess: () => {
       startTransition(() => {
         void navigate({ to: "/app/groups", replace: true });
@@ -51,93 +35,57 @@ export function LoginPage() {
     },
   });
 
-  if (auth.status === "authenticated") {
-    return <Navigate to="/app/groups" replace />;
-  }
+  if (auth.status === "authenticated") return <Navigate to="/app/groups" replace />;
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-10">
-      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-        <Panel className="overflow-hidden p-7 lg:p-9" strong>
-          <div className="text-xs font-semibold uppercase tracking-[0.28em] text-[var(--accent)]">
-            RibSys
-          </div>
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-slate-900">
-            先把核心业务链路跑起来
+    <div className="flex min-h-screen items-center justify-center bg-slate-100 p-4">
+      <div className="grid w-full max-w-5xl gap-5 lg:grid-cols-[1fr_420px]">
+        <Surface className="p-8">
+          <div className="text-sm font-semibold text-cyan-700">RibSys</div>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-slate-950">
+            拼团流程工作台
           </h1>
-          <p className="mt-4 max-w-xl text-sm leading-7 text-slate-600">
-            当前版本优先打通登录、谷团、拼团详情和管理入口。还没完全定稿的页面先保持轻量，
-            但角色差异、状态标签和响应式结构已经预留好了。
+          <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-600">
+            登录后进入移动端优先的 App 样式主界面，底部保留首页、谷团、我的。所有业务数据通过后端 API 读取。
           </p>
-
-          {showDevAccounts ? (
-            <div className="mt-8 space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                开发态快捷账号
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {demoAccounts.map((item) => (
-                  <button
-                    key={item.account}
-                    type="button"
-                    className="rounded-[24px] border border-white/80 bg-white/78 p-4 text-left transition hover:bg-white"
-                    onClick={() => {
-                      setValue("account", item.account, { shouldValidate: true });
-                      setValue("password", "123456", { shouldValidate: true });
-                    }}
-                  >
-                    <div className="text-sm font-semibold text-slate-900">{item.label}</div>
-                    <div className="mt-1 text-xs text-slate-500">
-                      账号 {item.account} / 密码 123456
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs leading-6 text-slate-500">
-                这里只在开发环境显示，方便本地 mock 或后端种子账号联调；生产环境不会默认暴露这些提示。
-              </p>
-            </div>
-          ) : null}
-        </Panel>
-
-        <Panel className="p-6 lg:p-8">
-          <div className="space-y-2">
-            <h2 className="text-2xl font-semibold text-slate-900">登录系统</h2>
-            <p className="text-sm text-slate-600">
-              当前接入的是 {runtimeModeLabel}。正式环境只需要输入自己的账号和密码；
-              开发态才会额外显示本地联调用的快捷账号。
-            </p>
+          <div className="mt-8 grid gap-3 sm:grid-cols-2">
+            {demoAccounts.map((account) => (
+              <button
+                key={account}
+                type="button"
+                className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-left text-sm hover:bg-white"
+                onClick={() => {
+                  form.setValue("account", account, { shouldValidate: true });
+                  form.setValue("password", "123456", { shouldValidate: true });
+                }}
+              >
+                <div className="font-semibold text-slate-900">{account}</div>
+                <div className="mt-1 text-xs text-slate-500">开发种子账号，密码 123456</div>
+              </button>
+            ))}
           </div>
+        </Surface>
 
-          <form
-            className="mt-6 space-y-4"
-            onSubmit={handleSubmit((values) => loginMutation.mutate(values))}
-          >
-            <Field label="账号 / QQ 号" error={errors.account?.message}>
-              <TextInput placeholder="例如 member" {...register("account")} />
+        <Surface className="p-6">
+          <h2 className="text-xl font-semibold text-slate-950">登录</h2>
+          <form className="mt-5 space-y-4" onSubmit={form.handleSubmit((values) => mutation.mutate(values))}>
+            <Field label="账号 / QQ 号" error={form.formState.errors.account?.message}>
+              <TextInput {...form.register("account")} placeholder="请输入账号" />
             </Field>
-
-            <Field label="密码" error={errors.password?.message}>
-              <TextInput type="password" placeholder="请输入密码" {...register("password")} />
+            <Field label="密码" error={form.formState.errors.password?.message}>
+              <TextInput {...form.register("password")} type="password" placeholder="请输入密码" />
             </Field>
-
-            {loginMutation.error ? (
-              <p className="text-sm text-rose-600">{loginMutation.error.message}</p>
-            ) : null}
-
-            <Button className="w-full" busy={loginMutation.isPending} type="submit">
-              登录并进入谷团
+            {mutation.error ? <p className="text-sm text-rose-600">{mutation.error.message}</p> : null}
+            <Button className="w-full" busy={mutation.isPending} type="submit">
+              登录
               <ArrowRight className="size-4" />
             </Button>
           </form>
-
-          <div className="mt-6 flex items-center justify-between gap-4 text-sm text-slate-500">
-            <span>还没有账号？</span>
-            <Link to="/register" className="font-semibold text-[var(--blue)]">
-              注册 / 申请加入
-            </Link>
+          <div className="mt-5 flex items-center justify-between text-sm">
+            <span className="text-slate-500">还没有账号？</span>
+            <Link to="/register" className="font-semibold text-cyan-700">注册 / 申请加入</Link>
           </div>
-        </Panel>
+        </Surface>
       </div>
     </div>
   );

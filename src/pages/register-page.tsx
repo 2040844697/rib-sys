@@ -7,10 +7,9 @@ import { z } from "zod";
 
 import { api } from "@/lib/api";
 import { useAuthState } from "@/lib/auth-store";
-import type { RegisterResponse } from "@/types";
-import { Button, Field, Panel, TextInput } from "@/components/ui";
+import { Button, Field, Surface, TextInput } from "@/components/ui";
 
-const registerSchema = z
+const schema = z
   .object({
     displayName: z.string().trim().min(2, "请填写展示名"),
     qqNumber: z.string().trim().min(5, "请填写 QQ 号"),
@@ -19,121 +18,61 @@ const registerSchema = z
     confirmPassword: z.string().min(6, "请再次输入密码"),
   })
   .refine((value) => value.password === value.confirmPassword, {
-    message: "两次输入的密码不一致",
+    message: "两次密码输入不一致",
     path: ["confirmPassword"],
   });
 
-type RegisterFormValues = z.infer<typeof registerSchema>;
+type FormValues = z.infer<typeof schema>;
 
 export function RegisterPage() {
   const auth = useAuthState();
-  const [submittedResult, setSubmittedResult] = useState<{
-    response: RegisterResponse;
-    qqNumber: string;
-  } | null>(null);
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<RegisterFormValues>({
-    resolver: zodResolver(registerSchema),
-    defaultValues: {
-      displayName: "",
-      qqNumber: "",
-      groupNickname: "",
-      password: "",
-      confirmPassword: "",
-    },
+  const [done, setDone] = useState(false);
+  const form = useForm<FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: { displayName: "", qqNumber: "", groupNickname: "", password: "", confirmPassword: "" },
   });
 
-  const registerMutation = useMutation({
-    mutationFn: (values: RegisterFormValues) => api.register(values),
-    onSuccess: (response, values) => {
-      setSubmittedResult({
-        response,
-        qqNumber: values.qqNumber,
-      });
-    },
+  const mutation = useMutation({
+    mutationFn: (values: FormValues) => api.register(values),
+    onSuccess: () => setDone(true),
   });
 
-  if (auth.status === "authenticated") {
-    return <Navigate to="/app/groups" replace />;
-  }
+  if (auth.status === "authenticated") return <Navigate to="/app/groups" replace />;
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-10">
-      <Panel className="w-full max-w-2xl p-6 lg:p-8" strong>
-        <div className="space-y-2">
-          <div className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--accent)]">
-            加入 RibSys
-          </div>
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-            先做一个可提交的注册 / 申请页
-          </h1>
-          <p className="text-sm leading-7 text-slate-600">
-            文档里提到这里后续可能会切成“申请加入”模式，所以当前实现优先保证字段结构和提交流程可用。
-          </p>
-        </div>
-
-        {submittedResult ? (
-          <div className="mt-6 rounded-[24px] bg-emerald-50 p-5 text-emerald-700">
-            <div className="text-lg font-semibold">提交成功</div>
-            <p className="mt-2 text-sm">
-              {submittedResult.response.canLoginNow === false ||
-              submittedResult.response.nextAction === "wait_review"
-                ? "注册申请已提交，当前账号暂时还不能立即登录。后续如果后端切到审核模式，这里会继续沿用这一种提示。"
-                : `账号已创建成功。你可以使用 QQ 号 ${submittedResult.qqNumber} 和刚设置的密码直接登录。`}
-            </p>
+    <div className="flex min-h-screen items-center justify-center bg-slate-100 p-4">
+      <Surface className="w-full max-w-2xl p-6">
+        <h1 className="text-2xl font-semibold text-slate-950">注册 / 申请加入</h1>
+        <p className="mt-2 text-sm text-slate-600">第一版以登录为主，这里承接注册或审核申请流程。</p>
+        {done ? (
+          <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+            提交成功。后端如果启用审核模式，账号会进入待审核；否则可以返回登录。
           </div>
         ) : null}
-
-        <form
-          className="mt-6 grid gap-4 lg:grid-cols-2"
-          onSubmit={handleSubmit((values) => registerMutation.mutate(values))}
-        >
-          <Field label="展示名" error={errors.displayName?.message}>
-            <TextInput placeholder="例如 成员A" {...register("displayName")} />
+        <form className="mt-5 grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit((values) => mutation.mutate(values))}>
+          <Field label="展示名" error={form.formState.errors.displayName?.message}>
+            <TextInput {...form.register("displayName")} />
           </Field>
-
-          <Field label="QQ 号" error={errors.qqNumber?.message}>
-            <TextInput placeholder="请输入 QQ 号" {...register("qqNumber")} />
+          <Field label="QQ 号" error={form.formState.errors.qqNumber?.message}>
+            <TextInput {...form.register("qqNumber")} />
           </Field>
-
-          <Field label="群昵称" error={errors.groupNickname?.message}>
-            <TextInput placeholder="例如 A昵称" {...register("groupNickname")} />
+          <Field label="群昵称" error={form.formState.errors.groupNickname?.message}>
+            <TextInput {...form.register("groupNickname")} />
           </Field>
-
           <div />
-
-          <Field label="密码" error={errors.password?.message}>
-            <TextInput type="password" placeholder="请设置密码" {...register("password")} />
+          <Field label="密码" error={form.formState.errors.password?.message}>
+            <TextInput type="password" {...form.register("password")} />
           </Field>
-
-          <Field label="确认密码" error={errors.confirmPassword?.message}>
-            <TextInput
-              type="password"
-              placeholder="请再次输入密码"
-              {...register("confirmPassword")}
-            />
+          <Field label="确认密码" error={form.formState.errors.confirmPassword?.message}>
+            <TextInput type="password" {...form.register("confirmPassword")} />
           </Field>
-
-          {registerMutation.error ? (
-            <p className="text-sm text-rose-600 lg:col-span-2">
-              {registerMutation.error.message}
-            </p>
-          ) : null}
-
-          <div className="flex flex-wrap gap-3 lg:col-span-2">
-            <Button busy={registerMutation.isPending} type="submit">
-              提交注册
-            </Button>
-            <Link to="/login" className="button-secondary">
-              返回登录
-            </Link>
+          {mutation.error ? <p className="text-sm text-rose-600 sm:col-span-2">{mutation.error.message}</p> : null}
+          <div className="flex gap-2 sm:col-span-2">
+            <Button busy={mutation.isPending} type="submit">提交</Button>
+            <Link to="/login" className="btn btn-secondary">返回登录</Link>
           </div>
         </form>
-      </Panel>
+      </Surface>
     </div>
   );
 }

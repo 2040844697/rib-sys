@@ -33,7 +33,6 @@ class AuthStore {
   };
 
   private bootstrapPromise: Promise<BootstrapResponse | null> | null = null;
-
   private listeners = new Set<() => void>();
 
   subscribe = (listener: () => void) => {
@@ -65,10 +64,7 @@ class AuthStore {
       return this.bootstrapPromise;
     }
 
-    this.setSnapshot({
-      ...this.snapshot,
-      status: "loading",
-    });
+    this.setSnapshot({ ...this.snapshot, status: "loading" });
 
     this.bootstrapPromise = api
       .bootstrap()
