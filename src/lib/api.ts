@@ -17,6 +17,7 @@ import type {
   LoginResponse,
   RegisterRequest,
   RegisterResponse,
+  UploadFileResponse,
   UpdateMePayload,
 } from "@/types";
 
@@ -131,6 +132,15 @@ export const api = {
   },
   updateMe(payload: UpdateMePayload) {
     return fetchJson<{ ok: true }>("/api/me", { method: "PATCH", bodyJson: payload });
+  },
+  uploadFile(file: File, bucket = "misc") {
+    const formData = new FormData();
+    formData.set("bucket", bucket);
+    formData.set("file", file);
+    return fetchJson<UploadFileResponse>("/api/file-uploads", {
+      method: "POST",
+      body: formData,
+    });
   },
   getGroups() {
     return fetchJson<GroupsResponse>("/api/app/groups");

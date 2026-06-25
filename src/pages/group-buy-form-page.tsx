@@ -18,7 +18,7 @@ import {
 
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { GoodsSummary, GroupBuyItem } from "@/types";
+import type { GoodsSummary, GroupBuyItem, UploadedImageRef } from "@/types";
 import {
   Button,
   EmptyState,
@@ -38,7 +38,6 @@ type SaleMode = "全款" | "定金尾款";
 interface FormState {
   title: string;
   description: string;
-  coverImageUrl: string;
   groupBuyType: string;
   claimMode: ClaimMode;
   canCancelClaim: boolean;
@@ -58,6 +57,8 @@ interface EditableItem {
   goodsId?: string | null;
   name: string;
   imageUrl: string;
+  fileObjectId?: string | null;
+  pendingImageFile?: File;
   localImagePreviewUrl?: string;
   localImageName?: string;
   unitPriceCny: string;
@@ -73,6 +74,13 @@ interface EditableItem {
   sourceWeightGram?: string;
 }
 
+interface LocalImageRef extends UploadedImageRef {
+  localId: string;
+  file?: File;
+  previewUrl?: string;
+  uploading?: boolean;
+}
+
 const groupBuyTypes = ["群内开谷", "群内切煤", "国外全新", "国外二手", "群友出物", "国内现货", "补款", "补寄", "现货加开"];
 const claimModes: ClaimMode[] = ["拼盒", "单领"];
 const saleModes: SaleMode[] = ["全款", "定金尾款"];
@@ -80,7 +88,6 @@ const saleModes: SaleMode[] = ["全款", "定金尾款"];
 const initialForm: FormState = {
   title: "",
   description: "",
-  coverImageUrl: "",
   groupBuyType: "群内开谷",
   claimMode: "单领",
   canCancelClaim: false,
@@ -419,6 +426,64 @@ function ImageTile({
   );
 }
 
+function MultiImageUploader({
+  images,
+  onAdd,
+  onRemove,
+}: {
+  images: LocalImageRef[];
+  onAdd: (files: File[]) => void;
+  onRemove: (localId: string) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-3">
+        {images.map((image, index) => (
+          <div className="group relative size-28 overflow-hidden rounded-lg bg-slate-100" key={image.localId}>
+            <img alt="" className="size-full object-cover" src={image.previewUrl || image.url} />
+            {index === 0 ? (
+              <span className="absolute left-2 top-2 rounded bg-cyan-600 px-1.5 py-0.5 text-[11px] font-semibold text-white">
+                主图
+              </span>
+            ) : null}
+            {image.uploading ? (
+              <span className="absolute inset-x-2 bottom-2 rounded bg-white/90 px-2 py-1 text-center text-[11px] font-semibold text-slate-600">
+                待上传
+              </span>
+            ) : null}
+            <button
+              className="absolute right-1.5 top-1.5 flex size-7 items-center justify-center rounded-full bg-white/90 text-slate-600 opacity-0 shadow transition hover:text-rose-600 group-hover:opacity-100"
+              onClick={() => onRemove(image.localId)}
+              type="button"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        ))}
+        <label className="flex size-28 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center text-slate-500 transition hover:border-cyan-400 hover:bg-cyan-50 hover:text-cyan-700">
+          <input
+            accept="image/*"
+            className="sr-only"
+            multiple
+            onChange={(event) => {
+              const files = Array.from(event.target.files || []);
+              if (files.length) onAdd(files);
+              event.target.value = "";
+            }}
+            type="file"
+          />
+          <ImagePlus className="size-8" />
+          <span className="mt-1 text-xs font-semibold">上传活动图</span>
+          <span className="text-[11px]">可多选</span>
+        </label>
+      </div>
+      {images.length ? (
+        <p className="text-xs text-slate-500">第一张会作为拼团卡片主图，其他图片会随拼团配置保存。</p>
+      ) : null}
+    </div>
+  );
+}
+
 function PriceDisplay({
   item,
   equalPriceEnabled,
@@ -538,6 +603,7 @@ function ItemEditorModal({
             onFile={(file) => {
               setDraft({
                 ...draft,
+                pendingImageFile: file,
                 localImagePreviewUrl: URL.createObjectURL(file),
                 localImageName: file.name,
               });
@@ -551,11 +617,9 @@ function ItemEditorModal({
               placeholder="谷子名称"
               value={draft.name}
             />
-            <TextInput
-              onChange={(event) => setDraft({ ...draft, imageUrl: event.target.value, localImagePreviewUrl: undefined })}
-              placeholder="图片地址"
-              value={draft.imageUrl}
-            />
+            <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+              {draft.localImageName || "上传后会自动保存为谷子图片"}
+            </div>
           </div>
         </div>
 
@@ -765,8 +829,7 @@ export function GroupBuyFormPage() {
   const [equalPrice, setEqualPrice] = useState("");
   const [editingItem, setEditingItem] = useState<EditableItem | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [coverPreviewUrl, setCoverPreviewUrl] = useState("");
-  const [coverFileName, setCoverFileName] = useState("");
+  const [coverImages, setCoverImages] = useState<LocalImageRef[]>([]);
   const [deleteWarning, setDeleteWarning] = useState("");
 
   const detailQuery = useQuery({
@@ -795,8 +858,28 @@ export function GroupBuyFormPage() {
       title: detail.groupBuy.title,
       description: detail.groupBuy.description || "",
       groupBuyType: detail.groupBuy.type,
+      claimMode: detail.groupBuy.claimMode === "拼盒" ? "拼盒" : "单领",
+      canCancelClaim: Boolean(detail.groupBuy.canCancelClaim),
+      startAt: toDateTimeLocal(detail.groupBuy.startAt),
       closeAt: toDateTimeLocal(detail.groupBuy.closeAt),
+      saleMode: detail.groupBuy.saleMode === "定金尾款" ? "定金尾款" : "全款",
+      allowTransfer: Boolean(detail.groupBuy.allowTransfer),
+      remindBeforeStart: detail.groupBuy.advancedSettings?.remindBeforeStart ?? current.remindBeforeStart,
+      showParticipantCount: detail.groupBuy.advancedSettings?.showParticipantCount ?? current.showParticipantCount,
+      showTotalAmount: detail.groupBuy.advancedSettings?.showTotalAmount ?? current.showTotalAmount,
+      showClaimedQuantity: detail.groupBuy.advancedSettings?.showClaimedQuantity ?? current.showClaimedQuantity,
     }));
+    const restoredImages = detail.groupBuy.advancedSettings?.coverImages?.length
+      ? detail.groupBuy.advancedSettings.coverImages
+      : detail.groupBuy.coverImageUrl
+        ? [{ fileObjectId: detail.groupBuy.coverFileObjectId, url: detail.groupBuy.coverImageUrl, name: "活动主图" }]
+        : [];
+    setCoverImages(restoredImages.map((image, index) => ({
+      localId: image.fileObjectId || `cover_${index}`,
+      fileObjectId: image.fileObjectId,
+      url: image.url,
+      name: image.name,
+    })));
     setItems(detail.items.map(itemFromDetail));
     setItemsExpanded(detail.items.length > 0);
   }, [detailQuery.data]);
@@ -805,16 +888,31 @@ export function GroupBuyFormPage() {
   const hiddenItemCount = Math.max(items.length - 1, 0);
   const groupName = groupHomeQuery.data?.group.name || groupsQuery.data?.items.find((group) => group.id === activeGroupId)?.name;
 
-  const currentGroupChanged = useMemo(() => {
-    if (!groupBuyId || !detailQuery.data) return true;
-    const original = detailQuery.data.groupBuy;
-    return (
-      form.title !== original.title ||
-      form.description !== (original.description || "") ||
-      form.groupBuyType !== original.type ||
-      form.closeAt !== toDateTimeLocal(original.closeAt)
-    );
-  }, [detailQuery.data, form.closeAt, form.description, form.groupBuyType, form.title, groupBuyId]);
+  async function uploadLocalImage(image: LocalImageRef) {
+    if (!image.file) return image;
+    const uploaded = await api.uploadFile(image.file, "misc");
+    return {
+      ...image,
+      file: undefined,
+      previewUrl: undefined,
+      uploading: false,
+      fileObjectId: uploaded.fileObjectId,
+      url: uploaded.url,
+      name: image.name || image.file.name,
+    };
+  }
+
+  async function uploadItemImage(item: EditableItem) {
+    if (!item.pendingImageFile) return item;
+    const uploaded = await api.uploadFile(item.pendingImageFile, "misc");
+    return {
+      ...item,
+      pendingImageFile: undefined,
+      localImagePreviewUrl: undefined,
+      fileObjectId: uploaded.fileObjectId,
+      imageUrl: uploaded.url,
+    };
+  }
 
   const save = useMutation({
     mutationFn: async () => {
@@ -824,6 +922,18 @@ export function GroupBuyFormPage() {
       if (equalPriceEnabled && !equalPrice.trim()) throw new Error("开启均价后需要填写均价");
       items.forEach((item) => validateItem(item, equalPriceEnabled, equalPrice));
 
+      const uploadedCoverImages = await Promise.all(coverImages.map((image) => uploadLocalImage(image)));
+      setCoverImages(uploadedCoverImages);
+      const uploadedItems = await Promise.all(items.map((item) => uploadItemImage(item)));
+      setItems(uploadedItems);
+
+      const primaryImage = uploadedCoverImages[0];
+      const coverImagePayload = uploadedCoverImages.map(({ fileObjectId, url, name }) => ({
+        fileObjectId,
+        url,
+        name,
+      }));
+
       const basePayload = {
         groupId,
         type: form.groupBuyType,
@@ -831,7 +941,8 @@ export function GroupBuyFormPage() {
         description: form.description.trim(),
         closeAt: form.closeAt,
         startAt: form.startAt,
-        coverImageUrl: form.coverImageUrl,
+        coverFileObjectId: primaryImage?.fileObjectId || undefined,
+        coverImageUrl: primaryImage?.url || undefined,
         claimMode: form.claimMode,
         canCancelClaim: form.canCancelClaim,
         saleMode: form.saleMode,
@@ -841,13 +952,40 @@ export function GroupBuyFormPage() {
           showParticipantCount: form.showParticipantCount,
           showTotalAmount: form.showTotalAmount,
           showClaimedQuantity: form.showClaimedQuantity,
+          coverImages: coverImagePayload,
         },
         reason: "页面编辑拼团",
       };
 
+      const original = detailQuery.data?.groupBuy;
+      const originalAdvanced = original?.advancedSettings || {};
+      const originalImages = originalAdvanced.coverImages?.length
+        ? originalAdvanced.coverImages
+        : original?.coverImageUrl
+          ? [{ fileObjectId: original.coverFileObjectId, url: original.coverImageUrl, name: "活动主图" }]
+          : [];
+      const groupChanged = !original || (
+        form.title.trim() !== original.title ||
+        form.description.trim() !== (original.description || "") ||
+        form.groupBuyType !== original.type ||
+        form.startAt !== toDateTimeLocal(original.startAt) ||
+        form.closeAt !== toDateTimeLocal(original.closeAt) ||
+        primaryImage?.fileObjectId !== (original.coverFileObjectId || undefined) ||
+        primaryImage?.url !== (original.coverImageUrl || undefined) ||
+        form.claimMode !== (original.claimMode || "单领") ||
+        form.canCancelClaim !== Boolean(original.canCancelClaim) ||
+        form.saleMode !== (original.saleMode || "全款") ||
+        form.allowTransfer !== Boolean(original.allowTransfer) ||
+        form.remindBeforeStart !== (originalAdvanced.remindBeforeStart ?? initialForm.remindBeforeStart) ||
+        form.showParticipantCount !== (originalAdvanced.showParticipantCount ?? initialForm.showParticipantCount) ||
+        form.showTotalAmount !== (originalAdvanced.showTotalAmount ?? initialForm.showTotalAmount) ||
+        form.showClaimedQuantity !== (originalAdvanced.showClaimedQuantity ?? initialForm.showClaimedQuantity) ||
+        JSON.stringify(coverImagePayload) !== JSON.stringify(originalImages)
+      );
+
       let nextGroupBuyId = groupBuyId;
       if (groupBuyId) {
-        if (currentGroupChanged) await api.updateGroupBuy(groupBuyId, basePayload);
+        if (groupChanged) await api.updateGroupBuy(groupBuyId, basePayload);
       } else {
         const created = await api.createGroupBuy(basePayload);
         nextGroupBuyId = created.groupBuyId;
@@ -855,7 +993,7 @@ export function GroupBuyFormPage() {
 
       if (!nextGroupBuyId) throw new Error("后端没有返回拼团 ID");
 
-      for (const item of items) {
+      for (const item of uploadedItems) {
         const includeGoodsId = Boolean(item.goodsId && !item.persistedId);
         if (item.persistedId) {
           await api.updateGroupBuyItem(
@@ -886,6 +1024,24 @@ export function GroupBuyFormPage() {
 
   function updateForm(patch: Partial<FormState>) {
     setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function addCoverFiles(files: File[]) {
+    setCoverImages((current) => [
+      ...current,
+      ...files.map((file) => ({
+        localId: createLocalId("cover"),
+        file,
+        previewUrl: URL.createObjectURL(file),
+        url: "",
+        name: file.name,
+        uploading: true,
+      })),
+    ]);
+  }
+
+  function removeCoverImage(localId: string) {
+    setCoverImages((current) => current.filter((image) => image.localId !== localId));
   }
 
   function toggleEqualPrice() {
@@ -969,33 +1125,12 @@ export function GroupBuyFormPage() {
             value={form.title}
           />
           <TextArea
-            className="min-h-28 border-0 px-0 shadow-none focus:ring-0"
+            className="min-h-36 resize-y border-0 px-0 shadow-none focus:ring-0"
             onChange={(event) => updateForm({ description: event.target.value })}
             placeholder="填写拼团的规则和内容"
             value={form.description}
           />
-          <div className="flex flex-wrap items-end gap-3">
-            <ImageTile
-              imageUrl={coverPreviewUrl || form.coverImageUrl}
-              onFile={(file) => {
-                setCoverPreviewUrl(URL.createObjectURL(file));
-                setCoverFileName(file.name);
-              }}
-              subtitle={coverFileName}
-              title="上传活动主图"
-            />
-            <div className="min-w-64 flex-1">
-              <TextInput
-                onChange={(event) => {
-                  setCoverPreviewUrl("");
-                  setCoverFileName("");
-                  updateForm({ coverImageUrl: event.target.value });
-                }}
-                placeholder="活动主图地址"
-                value={form.coverImageUrl}
-              />
-            </div>
-          </div>
+          <MultiImageUploader images={coverImages} onAdd={addCoverFiles} onRemove={removeCoverImage} />
         </div>
       </Surface>
 

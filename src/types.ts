@@ -42,6 +42,20 @@ export interface RegisterResponse {
   nextAction?: "login" | "wait_review";
 }
 
+export interface UploadFileResponse {
+  fileObjectId: string;
+  url: string;
+  bucket: string;
+  objectKey: string;
+  fileObject?: Record<string, unknown>;
+}
+
+export interface UploadedImageRef {
+  fileObjectId?: string | null;
+  url: string;
+  name?: string;
+}
+
 export interface BootstrapResponse {
   currentUser: CurrentUser;
   defaultGroupId: string;
@@ -155,7 +169,21 @@ export interface GroupBuyDetailResponse {
     type: string;
     status: string;
     description?: string | null;
+    startAt?: string | null;
     closeAt: string;
+    coverFileObjectId?: string | null;
+    coverImageUrl?: string | null;
+    claimMode?: string | null;
+    canCancelClaim?: boolean | null;
+    saleMode?: string | null;
+    allowTransfer?: boolean | null;
+    advancedSettings?: {
+      remindBeforeStart?: boolean;
+      showParticipantCount?: boolean;
+      showTotalAmount?: boolean;
+      showClaimedQuantity?: boolean;
+      coverImages?: UploadedImageRef[];
+    };
     paymentChannelId?: string | null;
     stockKeeperUserId?: string | null;
   };
@@ -219,7 +247,21 @@ export interface GroupBuyCreatePayload {
   type: string;
   title: string;
   description: string;
+  startAt?: string;
   closeAt: string;
+  coverFileObjectId?: string;
+  coverImageUrl?: string;
+  claimMode?: string;
+  canCancelClaim?: boolean;
+  saleMode?: string;
+  allowTransfer?: boolean;
+  advancedSettings?: {
+    remindBeforeStart?: boolean;
+    showParticipantCount?: boolean;
+    showTotalAmount?: boolean;
+    showClaimedQuantity?: boolean;
+    coverImages?: UploadedImageRef[];
+  };
   paymentChannelId?: string;
   defaultChannel?: string;
   defaultStockKeeper?: string;

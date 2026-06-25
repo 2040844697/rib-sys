@@ -212,10 +212,33 @@ def _normalize_advanced_settings(value: Any) -> dict[str, Any]:
         "showParticipantCount",
         "showTotalAmount",
         "showClaimedQuantity",
+        "coverImages",
     }
     normalized: dict[str, Any] = {}
     for key, item in value.items():
         if key not in allowed_keys:
+            continue
+        if key == "coverImages":
+            if not isinstance(item, list):
+                raise AppError(400, "advancedSettings.coverImages格式不正确", "VALIDATION_FAILED")
+            images: list[dict[str, str | None]] = []
+            for image in item:
+                if not isinstance(image, dict):
+                    raise AppError(400, "advancedSettings.coverImages格式不正确", "VALIDATION_FAILED")
+                url = _normalize_required_text(image.get("url"), "活动图片")
+                images.append(
+                    {
+                        "fileObjectId": _normalize_optional_text(
+                            image.get("fileObjectId")
+                            if "fileObjectId" in image
+                            else image.get("file_object_id"),
+                            "活动图片文件",
+                        ),
+                        "url": url,
+                        "name": _normalize_optional_text(image.get("name"), "活动图片名称"),
+                    }
+                )
+            normalized[key] = images
             continue
         if not isinstance(item, bool):
             raise AppError(400, f"advancedSettings.{key}格式不正确", "VALIDATION_FAILED")
