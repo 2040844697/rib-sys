@@ -111,8 +111,12 @@ export function GroupDetailPage() {
         {buysQuery.data?.items.map((item) => (
           <Link key={item.id} to="/app/group-buys/$groupBuyId" params={{ groupBuyId: item.id }}>
             <Surface className="overflow-hidden hover:border-cyan-300">
-              <div className="flex aspect-[16/8] items-center justify-center bg-slate-100 text-4xl font-semibold text-cyan-800">
-                {item.title.slice(0, 1)}
+              <div className="flex aspect-[16/8] items-center justify-center overflow-hidden bg-slate-100 text-4xl font-semibold text-cyan-800">
+                {item.coverImageUrl ? (
+                  <img alt="" className="size-full object-cover" src={item.coverImageUrl} />
+                ) : (
+                  item.title.slice(0, 1)
+                )}
               </div>
               <div className="p-4">
                 <div className="flex flex-wrap items-center gap-2">

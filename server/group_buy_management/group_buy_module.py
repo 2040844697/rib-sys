@@ -400,15 +400,15 @@ class GroupBuyModule:
         if "admin" not in member.get("roles", []) and member.get("groupId") != group_id:
             raise AppError(400, "成员不属于当前谷团", "VALIDATION_FAILED")
 
-    def _normalize_status_filter(self, status_filter: str | None) -> list[str] | None:
-        # 前端筛选项沿用旧接口语义，DB 查询时转换成明确状态列表。
+    def _normalize_status_filter(self, status_filter: str | None) -> tuple[list[str] | None, str | None]:
+        # 前端列表按“时间分类 + 状态机”筛选，不直接把未开始等同于等待开团。
         if not status_filter or status_filter == "全部":
-            return None
+            return None, None
         if status_filter == "进行中":
-            return sorted(CLAIMABLE_GROUP_BUY_STATUSES)
+            return None, "active_by_time"
         if status_filter == "未开始":
-            return [GROUP_BUY_STATUS_WAITING]
-        return [_normalize_group_buy_status(status_filter)]
+            return None, "upcoming_by_time"
+        return [_normalize_group_buy_status(status_filter)], None
 
     def _build_item_snapshot_from_goods(self, goods_id: str) -> dict[str, Any]:
         if self.get_goods_snapshot is None:
@@ -517,7 +517,7 @@ class GroupBuyModule:
     ) -> dict[str, Any]:
         self._assert_database_enabled()
         self._require_group_access(actor_user_id, group_id)
-        statuses = self._normalize_status_filter(filters.get("status"))
+        statuses, status_mode = self._normalize_status_filter(filters.get("status"))
         keyword = _normalize_optional_text(filters.get("keyword"), "keyword")
 
         with connect(self.config) as conn:
@@ -526,6 +526,7 @@ class GroupBuyModule:
                 group_id=group_id,
                 member_user_id=actor_user_id,
                 statuses=statuses,
+                status_mode=status_mode,
                 keyword=keyword,
             )
             conn.rollback()

@@ -60,12 +60,13 @@ class GroupBuyRepository:
 
     def _build_group_buy_list_item(self, row: dict[str, Any]) -> dict[str, Any]:
         # 列表 DTO 在团购快照基础上补齐商品聚合和当前用户认领数。
+        snapshot = self._build_group_buy_snapshot(row)
         return {
-            **self._build_group_buy_snapshot(row),
+            **snapshot,
             "itemCount": int(row.get("item_count") or 0),
             "availableQuantity": int(row.get("available_quantity") or 0),
             "myRecordCount": int(row.get("my_record_count") or 0),
-            "coverImageUrl": row.get("cover_image_url"),
+            "coverImageUrl": snapshot.get("coverImageUrl") or row.get("item_cover_image_url"),
         }
 
     def _build_group_buy_snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -201,6 +202,7 @@ class GroupBuyRepository:
         group_id: str,
         member_user_id: str,
         statuses: list[str] | None,
+        status_mode: str | None,
         keyword: str | None,
     ) -> list[dict[str, Any]]:
         # 列表查询只从 DB 聚合，不再读取旧 JSON 中的团购和商品。
@@ -209,6 +211,15 @@ class GroupBuyRepository:
         if statuses:
             conditions.append("gb.status = ANY(%s)")
             params.append(statuses)
+        if status_mode == "upcoming_by_time":
+            conditions.append("gb.status = '等待开团'")
+            conditions.append("(gb.start_at IS NOT NULL AND gb.start_at > NOW())")
+        elif status_mode == "active_by_time":
+            conditions.append(
+                "(gb.status = ANY(%s) OR (gb.status = '等待开团' AND gb.start_at IS NOT NULL AND gb.start_at <= NOW()))"
+            )
+            params.append(["拼拼拼", "已切"])
+            conditions.append("gb.close_at > NOW()")
         if keyword:
             conditions.append("(LOWER(gb.title) LIKE %s OR LOWER(gb.type) LIKE %s)")
             like_keyword = f"%{keyword.lower()}%"
@@ -222,7 +233,7 @@ class GroupBuyRepository:
                   gb.*,
                   COALESCE(item_stats.item_count, 0) AS item_count,
                   COALESCE(item_stats.available_quantity, 0) AS available_quantity,
-                  item_stats.cover_image_url,
+                  item_stats.item_cover_image_url,
                   COALESCE(member_records.my_record_count, 0) AS my_record_count
                 FROM group_buys gb
                 LEFT JOIN (
@@ -234,7 +245,7 @@ class GroupBuyRepository:
                       FILTER (
                         WHERE image_url_snapshot IS NOT NULL
                           AND image_url_snapshot <> ''
-                      ))[1] AS cover_image_url
+                      ))[1] AS item_cover_image_url
                   FROM group_buy_items
                   GROUP BY group_buy_id
                 ) item_stats ON item_stats.group_buy_id = gb.id
